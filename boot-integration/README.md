@@ -13,8 +13,14 @@ Two things live here:
 2. **The kexec glue** (`kexec-boot.sh`): given a selected real kernel's
    linux/initrd paths (as they appear in `grub.cfg`) and cmdline, from
    `initramfs/discover-kernels.sh` via `initramfs/init`, runs `kexec -l`
-   then `kexec -e`.
+   then `kexec -e`. Deliberately refuses to run (`set -eu`, `${2:?}`) if
+   the linux path is missing/empty - `initramfs/init` is responsible for
+   never `exec`ing into this script with an empty selection in the first
+   place (it's `exec`'d in place of PID 1, so this script's own clean
+   refusal would otherwise surface as a kernel panic instead of anything
+   recoverable - see `initramfs/README.md`).
 
-Not yet tested against real hardware - both pieces are written against the
-GRUB config shape from a synthetic test file, not the Slate's actual
-`grub.cfg`.
+`discover-kernels.sh` (which this depends on for what to offer) has since
+been verified against the Slate's actual `grub.cfg`, not just a synthetic
+test file - see `initramfs/README.md`. `kexec-boot.sh`/`grub-picker-entry.cfg`
+themselves are still untested against real hardware.

@@ -12,6 +12,23 @@ mdev -s
 
 mkdir -p /run/picker /mnt/root
 
+# kexec-boot.sh correctly refuses to run with a missing linux path
+# (set -eu, ${2:?}) - but since it's exec'd below in place of PID 1,
+# that clean refusal becomes "Attempted to kill init!" instead of
+# anything recoverable. So every stage that could leave
+# SELECTED_LINUX empty needs to be caught here first, with a real
+# fallback - either the first discovered kernel (same "first entry is
+# the default" convention PICKER_TIMEOUT_SECS uses in ui/picker.c) or,
+# if there's no discovered kernel to fall back to at all, a rescue
+# shell instead of letting init exit and panic. Found and verified via
+# a standalone control-flow test (not hardware-dependent - pure shell
+# logic) after real-hardware code review turned up the gap.
+rescue() {
+    echo "picker: $1" >&2
+    echo "picker: dropping to a rescue shell" >&2
+    exec /bin/sh
+}
+
 # Root and /boot are the same partition on the Slate: /dev/mmcblk0p2
 # (ext4, eMMC via sdhci_pci/cqhci - no NVMe/SATA/UFS). No LABEL is set,
 # and busybox mdev doesn't populate /dev/disk/by-uuid without a custom
@@ -24,13 +41,40 @@ mkdir -p /run/picker /mnt/root
 # GRUB's own EFI binary - grub.cfg lives on this ext4 partition, so the
 # ESP is never mounted here.
 : "${REAL_ROOT_DEV:=/dev/mmcblk0p2}"
-mount -o ro "$REAL_ROOT_DEV" /mnt/root
+if ! mount -o ro "$REAL_ROOT_DEV" /mnt/root; then
+    rescue "failed to mount real root ($REAL_ROOT_DEV)"
+fi
 
-/bin/discover-kernels.sh /mnt/root/boot/grub/grub.cfg > /run/picker/menu.tsv
+if ! /bin/discover-kernels.sh /mnt/root/boot/grub/grub.cfg > /run/picker/menu.tsv || [ ! -s /run/picker/menu.tsv ]; then
+    rescue "no kernel entries found (discover-kernels.sh failed, or grub.cfg missing/empty)"
+fi
 
-/bin/picker /run/picker/menu.tsv > /run/picker/selected
+# Fallback target if the picker itself fails for any reason (no touch
+# device, no DRM output, crash, ...).
+default_line=$(head -n1 /run/picker/menu.tsv)
+default_linux=$(printf '%s' "$default_line" | cut -f2)
+default_initrd=$(printf '%s' "$default_line" | cut -f3)
+default_cmdline=$(printf '%s' "$default_line" | cut -f4)
 
-# Sets SELECTED_LINUX, SELECTED_INITRD, SELECTED_CMDLINE.
-. /run/picker/selected
+if /bin/picker /run/picker/menu.tsv > /run/picker/selected; then
+    # Sets SELECTED_LINUX, SELECTED_INITRD, SELECTED_CMDLINE.
+    . /run/picker/selected
+else
+    echo "picker: picker exited with an error - falling back to the default entry" >&2
+    SELECTED_LINUX="$default_linux"
+    SELECTED_INITRD="$default_initrd"
+    SELECTED_CMDLINE="$default_cmdline"
+fi
+
+if [ -z "$SELECTED_LINUX" ]; then
+    echo "picker: picker produced no selection - falling back to the default entry" >&2
+    SELECTED_LINUX="$default_linux"
+    SELECTED_INITRD="$default_initrd"
+    SELECTED_CMDLINE="$default_cmdline"
+fi
+
+if [ -z "$SELECTED_LINUX" ]; then
+    rescue "no usable kernel entry to boot"
+fi
 
 exec /sbin/kexec-boot.sh /mnt/root "$SELECTED_LINUX" "$SELECTED_INITRD" "$SELECTED_CMDLINE"
