@@ -36,11 +36,26 @@ see `../.gitignore`).
   Default**: boots this entry now (same as Boot) and also asks
   `initramfs/init` to persist it as the future default via
   `SET_DEFAULT=1` in the picker's stdout output - see
-  `initramfs/README.md` for how that's actually written to disk. Both
-  found and fixed a real layout bug in testing: the msgbox footer's
-  inherited flex gap made two 50%-width buttons individually overflow
-  their row, so all four stacked one-per-line instead of forming a 2x2
-  grid, until the gap was explicitly zeroed.
+  `initramfs/README.md` for how that's actually written to disk.
+  Confirmed with Bob: "Set Default" boots immediately, not just
+  saves-and-returns-to-the-menu - matches the implementation as-is.
+- Whichever entry is currently the persisted default shows a
+  `LV_SYMBOL_OK` checkmark, fixed to the row's right edge (not part of
+  the scrolling title text, so a long title can never push it out of
+  view) - `apply-default.sh` marks it via a 5th `is_default` TSV field
+  it appends to every line, and `load_entries()`/`build_ui()` read and
+  render it. Long titles get `LV_LABEL_LONG_DOT` ellipsis-truncated
+  instead of overlapping the checkmark - verified directly (not just
+  visually reasoned about) via a standalone harness checking the
+  title label's and checkmark's actual computed pixel bounds don't
+  intersect, using the real "Ubuntu, with Linux ... (recovery mode)"
+  style long title from the real grub.cfg.
+
+The confirm dialog's 2x2 grid also found and fixed a real layout bug
+in testing: the msgbox footer's inherited flex gap made two 50%-width
+buttons individually overflow their row, so all four stacked
+one-per-line instead of forming a 2x2 grid, until the gap was
+explicitly zeroed.
 - `PICKER_TIMEOUT_SECS` (default 10, `0` disables) auto-boots the first
   entry if nothing's tapped, cancelled by the first touch - mirrors
   GRUB's own timeout-to-default behavior, the actual safety net for a

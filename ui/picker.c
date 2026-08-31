@@ -67,6 +67,7 @@ struct entry {
     char linux_path[256];
     char initrd_path[256];
     char cmdline[512];
+    int is_default;
 };
 
 /* ---------------- menu.tsv ---------------- */
@@ -81,9 +82,9 @@ static int load_entries(const char *path, struct entry *entries, int max) {
     int n = 0;
     while (n < max && fgets(line, sizeof(line), fp)) {
         line[strcspn(line, "\n")] = '\0';
-        char *fields[4] = {0};
+        char *fields[5] = {0};
         char *p = line;
-        for (int i = 0; i < 4 && p; i++) {
+        for (int i = 0; i < 5 && p; i++) {
             fields[i] = p;
             char *tab = strchr(p, '\t');
             if (tab) { *tab = '\0'; p = tab + 1; } else { p = NULL; }
@@ -93,6 +94,7 @@ static int load_entries(const char *path, struct entry *entries, int max) {
         snprintf(entries[n].linux_path, sizeof(entries[n].linux_path), "%s", fields[1] ? fields[1] : "");
         snprintf(entries[n].initrd_path, sizeof(entries[n].initrd_path), "%s", fields[2] ? fields[2] : "");
         snprintf(entries[n].cmdline, sizeof(entries[n].cmdline), "%s", fields[3] ? fields[3] : "");
+        entries[n].is_default = (fields[4] && fields[4][0] == '1');
         n++;
     }
     fclose(fp);
@@ -590,10 +592,23 @@ static void build_ui(struct entry *entries, int n, int timeout_secs, lv_obj_t **
         lv_obj_set_style_bg_color(btn, lv_color_hex(0x2a3a4d), LV_STATE_PRESSED);
         lv_obj_set_style_radius(btn, 10, 0);
 
+        /* The default-entry checkmark sits at a fixed spot on the
+         * right so it's never pushed out of view by a long title -
+         * the title label gets ellipsis-truncated and a reserved
+         * right margin instead of being centered over the whole row. */
         lv_obj_t *label = lv_label_create(btn);
         lv_label_set_text_fmt(label, LV_SYMBOL_USB "  %s", entries[i].title);
         lv_obj_set_style_text_color(label, lv_color_hex(0xe8eef4), 0);
-        lv_obj_center(label);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(label, lv_pct(entries[i].is_default ? 82 : 100));
+        lv_obj_align(label, LV_ALIGN_LEFT_MID, 16, 0);
+
+        if (entries[i].is_default) {
+            lv_obj_t *mark = lv_label_create(btn);
+            lv_label_set_text(mark, LV_SYMBOL_OK);
+            lv_obj_set_style_text_color(mark, lv_color_hex(0x8ec6ff), 0);
+            lv_obj_align(mark, LV_ALIGN_RIGHT_MID, -16, 0);
+        }
 
         lv_obj_add_event_cb(btn, row_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
     }

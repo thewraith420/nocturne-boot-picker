@@ -38,11 +38,15 @@ on selection.
   passes the list through unchanged. This is the only place that needs
   to know about a persisted preference - `ui/picker.c`'s auto-boot
   timeout and `init`'s picker-failure fallback both already just take
-  "the first entry". Verified with a synthetic menu.tsv covering all
-  four cases: no marker, marker matches one entry, marker matches
-  multiple entries sharing a linux path (the "Ubuntu"/"Ubuntu, with
-  Linux X" pairing `discover-kernels.sh` already produces), marker
-  names a kernel that's since been removed.
+  "the first entry". Also appends a 5th `is_default` field ("1" or
+  empty) to every line, so `ui/picker.c` can show a checkmark on the
+  current default directly in the menu, not just act on it silently at
+  boot time. Verified with a synthetic menu.tsv covering all four
+  cases: no marker, marker matches one entry, marker matches multiple
+  entries sharing a linux path (the "Ubuntu"/"Ubuntu, with Linux X"
+  pairing `discover-kernels.sh` already produces), marker names a
+  kernel that's since been removed - checking the 5th field lands
+  correctly in every case, not just the reordering.
 
   Persisting the marker itself needs a brief `mount -o remount,rw` of
   the real root (deliberately mounted read-only otherwise, to keep the

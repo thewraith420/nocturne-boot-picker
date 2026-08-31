@@ -3,7 +3,10 @@
 # entry (if it still exists) is moved to the front - ui/picker.c's
 # auto-boot timeout and initramfs/init's picker-failure fallback both
 # just take "the first entry", so this is the only place that needs to
-# know about a persisted preference.
+# know about a persisted preference. Also appends a 5th
+# "is_default" field ("1" or empty) to every line, so ui/picker.c can
+# show which entry is the default directly on the menu, not just act
+# on it at boot time.
 #
 # Usage: apply-default.sh <menu.tsv> <default-marker-file>
 #
@@ -12,21 +15,24 @@
 # when the picker UI's "Set Default" is used. A missing marker file, or
 # one naming a path no longer present in menu.tsv (kernel since
 # removed), is not an error - menu.tsv just passes through in its
-# original (grub.cfg) order, today's existing behavior.
+# original (grub.cfg) order, today's existing behavior, with every
+# is_default field empty.
 
 set -eu
 menu="${1:?usage: apply-default.sh <menu.tsv> <default-marker-file>}"
 marker="${2:?}"
 
-if [ ! -f "$marker" ]; then
-    cat "$menu"
-    exit 0
+default_linux=""
+if [ -f "$marker" ]; then
+    default_linux=$(head -n1 "$marker")
 fi
 
-default_linux=$(head -n1 "$marker")
-
-awk -F'\t' -v want="$default_linux" '
-$2 == want { matched = matched $0 "\n"; next }
-{ rest = rest $0 "\n" }
+awk -F'\t' -v OFS='\t' -v want="$default_linux" '
+{
+    is_default = (want != "" && $2 == want) ? "1" : ""
+    line = $0 OFS is_default "\n"
+    if (is_default == "1") matched = matched line
+    else rest = rest line
+}
 END { printf "%s%s", matched, rest }
 ' "$menu"
