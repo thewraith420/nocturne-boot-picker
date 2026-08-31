@@ -27,6 +27,20 @@ and running `olddefconfig` silently does nothing - you have to disable the
 real driver-tree symbol (`WLAN`/`CFG80211`/`MAC80211`) first, then `WIRELESS`
 sticks once nothing is re-selecting it.
 
-**Not yet touched**: storage and filesystem drivers - blocked on open
-question #3 below (boot-entry discovery). No build attempted yet, config
-resolution (`olddefconfig`) only.
+**Storage/filesystem stripping done** (BobZKernel commit `d4a354e`), unblocked
+by nocturne-boot-picker's decision on open question #3 (parse the real
+grub.cfg live). Checked the real hardware to answer both the storage and
+filesystem questions at once:
+
+- Root + `/boot` are both on `/dev/mmcblk0p2`, ext4 - no separate `/boot`
+  mount. `/boot/efi` (`mmcblk0p1`, vfat) only holds GRUB's own EFI binary,
+  not `grub.cfg` - the picker never needs to touch it, no vfat support
+  needed.
+- `mmcblk0` is eMMC via `sdhci_pci`/`cqhci` on PCI - no NVMe, no SATA/AHCI,
+  no UFS on this hardware.
+
+Kept: `MMC`/`MMC_BLOCK`/`MMC_SDHCI`/`MMC_SDHCI_PCI`/`MMC_CQHCI` (the real
+eMMC path) + `EXT4_FS`. Everything else in the storage/fs tree stripped.
+
+Config-stripping work for this branch is now complete across every planned
+category. No build attempted yet - only `olddefconfig` (config resolution).
