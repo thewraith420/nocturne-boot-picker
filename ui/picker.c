@@ -325,11 +325,34 @@ struct touch_dev {
     struct input_absinfo abs_x, abs_y;
 };
 
+static int device_is_direct(int fd) {
+    unsigned long propbits[(INPUT_PROP_MAX / (sizeof(long) * 8)) + 1] = {0};
+    if (ioctl(fd, EVIOCGPROP(sizeof(propbits)), propbits) < 0) return 0;
+    return bit_set(propbits, INPUT_PROP_DIRECT);
+}
+
+/* Some hardware exposes several /dev/input/eventN nodes that all
+ * satisfy the ABS_MT_POSITION_X/ABS_X capability check - e.g. a
+ * combo Wacom pen+touch controller advertising multiple
+ * pen/stylus/mouse sub-interfaces alongside the actual finger
+ * digitizer. Capability bits alone aren't enough to tell them apart;
+ * INPUT_PROP_DIRECT is the kernel's actual "this is a touchscreen, not
+ * a pointer device" signal, found necessary by real-hardware testing
+ * after capability-only selection silently locked onto a non-touch
+ * node and touch never registered at all. Scans every candidate
+ * rather than stopping at the first match, preferring one that
+ * declares INPUT_PROP_DIRECT; falls back to the first capability-only
+ * match if none does. */
 static int touch_open(struct touch_dev *t) {
     DIR *dir = opendir("/dev/input");
     if (!dir) return -1;
     struct dirent *de;
-    int found = -1;
+    int found_fd = -1, found_direct = 0;
+    int found_code_x = 0, found_code_y = 0;
+    struct input_absinfo found_abs_x = {0}, found_abs_y = {0};
+    char found_path[300] = "";
+    char found_name[256] = "?";
+
     while ((de = readdir(dir))) {
         if (strncmp(de->d_name, "event", 5) != 0) continue;
         char path[300];
@@ -352,18 +375,41 @@ static int touch_open(struct touch_dev *t) {
             close(fd);
             continue;
         }
-        if (ioctl(fd, EVIOCGABS(code_x), &t->abs_x) < 0 || ioctl(fd, EVIOCGABS(code_y), &t->abs_y) < 0) {
+        struct input_absinfo ax, ay;
+        if (ioctl(fd, EVIOCGABS(code_x), &ax) < 0 || ioctl(fd, EVIOCGABS(code_y), &ay) < 0) {
             close(fd);
             continue;
         }
-        t->fd = fd;
-        t->code_x = code_x;
-        t->code_y = code_y;
-        found = 0;
-        break;
+
+        int is_direct = device_is_direct(fd);
+        if (found_fd < 0 || (is_direct && !found_direct)) {
+            if (found_fd >= 0) close(found_fd);
+            found_fd = fd;
+            found_code_x = code_x;
+            found_code_y = code_y;
+            found_abs_x = ax;
+            found_abs_y = ay;
+            found_direct = is_direct;
+            snprintf(found_path, sizeof(found_path), "%s", path);
+            char name[256] = "?";
+            ioctl(fd, EVIOCGNAME(sizeof(name)), name);
+            snprintf(found_name, sizeof(found_name), "%s", name);
+        } else {
+            close(fd);
+        }
     }
     closedir(dir);
-    return found;
+    if (found_fd < 0) return -1;
+
+    fprintf(stderr, "picker: touch device: %s (\"%s\"), INPUT_PROP_DIRECT=%s\n",
+            found_path, found_name, found_direct ? "yes" : "no");
+
+    t->fd = found_fd;
+    t->code_x = found_code_x;
+    t->code_y = found_code_y;
+    t->abs_x = found_abs_x;
+    t->abs_y = found_abs_y;
+    return 0;
 }
 
 /* Raw touch device coordinates arrive in the panel's fixed physical

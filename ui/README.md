@@ -23,7 +23,20 @@ see `../.gitignore`).
   `drmModeSetCrtc`) exactly as the raw-DRM version did.
 - Finds an evdev touch device (`ABS_MT_POSITION_X`, `ABS_X` fallback),
   scaled from the device's real `ABS_MT_POSITION_X/Y` range via
-  `EVIOCGABS` - not assumed 1:1 with framebuffer pixels.
+  `EVIOCGABS` - not assumed 1:1 with framebuffer pixels. Real-hardware
+  testing found capability bits alone aren't enough to pick the right
+  device: the Slate exposes five separate Wacom pen/touch sub-interface
+  nodes, and one of the non-touch ones happened to advertise
+  `ABS_MT_POSITION_X` too, so `touch_open()` locked onto it and touch
+  was completely dead - not misaligned, zero response. Fixed by scanning
+  every `/dev/input/eventN` candidate (not stopping at the first
+  capability match) and preferring one that reports `INPUT_PROP_DIRECT`
+  via `EVIOCGPROP` - the kernel's actual "this is a touchscreen, not a
+  pointer device" signal, which correctly disqualifies the Wacom
+  sub-interfaces even though some of them expose matching ABS axes.
+  Also prints the selected device's path and name to stderr, so a
+  future hardware round shows exactly what it locked onto rather than
+  inferring it from behavior.
 - Renders the kernel list as LVGL buttons in a themed dark UI (default
   theme, blue accent); tapping one opens a real confirmation dialog
   (`lv_msgbox`) with a 2x2 button grid - Edit / Set Default on top,
@@ -117,14 +130,38 @@ resolution and never told rotation is happening at all.
 - `signalfd`/`timerfd`/`poll()` mechanics for VT cooperation and the
   auto-boot timeout previously verified working (raw-DRM version); the
   same code carried over unchanged.
+- `touch_open()`'s device-selection fix (preferring `INPUT_PROP_DIRECT`
+  over capability-bits-only matching, after real hardware showed touch
+  completely dead - selecting one of the Slate's non-touch Wacom
+  sub-interfaces instead of the real digitizer): verified against real
+  kernel-level virtual input devices, not mocked. Created three actual
+  `/dev/input` nodes via `/dev/uinput` reproducing the exact bug shape -
+  two "pointer"-prop devices (one with plain `ABS_X`, one with
+  `ABS_MT_POSITION_X` - the actual trap that fooled the old logic) both
+  enumerated *before* a third `INPUT_PROP_DIRECT` device with matching
+  MT axes - and ran the real extracted `touch_open()` against them,
+  confirming it correctly skips both pointer-prop devices despite the
+  ordering and picks the direct one. Actually opening the resulting
+  `/dev/input/eventN` node hit a real permissions wall in this sandbox
+  (not in `input` group, no passwordless sudo) - not expected to apply
+  on the Slate, where the picker runs as root - so the device-open step
+  itself still needs on-device confirmation, but the selection logic
+  that was actually wrong has real-device-backed verification now.
+
+## Real-hardware results so far (`f866572`)
+
+Confirmed on the Slate: DRM master + i915 modeset work through LVGL's
+render path; `PICKER_ROTATE=270` is the correct upright orientation;
+the `VT_SETMODE` fix works (no repeat of the Ctrl+Alt+F1 hang). Touch
+was found completely dead at that commit - see the `touch_open()` fix
+above, not yet retested on hardware.
 
 ## Still needed, on real hardware
 
-Everything touch/i915/VT-switch actually needs the Slate: does DRM
-master + i915 modeset still work through LVGL's render path; which
-`PICKER_ROTATE` value reads upright; does touch registration work now
-that coordinates are properly scaled; does `VT_SETMODE` actually stop
-the Ctrl+Alt+F1 hang; does the widget/dialog UI actually look
+Retest touch now that `touch_open()` prefers `INPUT_PROP_DIRECT` -
+tapping the first row should open a confirm dialog naming that same
+first entry, not a different one (would indicate a touch-axis-swap bug
+independent of device selection); does the widget/dialog UI actually look
 TWRP-like and legible at the panel's real DPI (font/button sizing was
 chosen by eye against LVGL's default theme, not measured against the
 real screen); does the 10s auto-boot timeout avoid false-triggering
