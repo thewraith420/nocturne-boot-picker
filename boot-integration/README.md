@@ -2,14 +2,16 @@
 
 Two things live here:
 
-1. **The GRUB entry** (`grub-picker-entry.cfg`) that boots the picker
-   kernel+initramfs by default (GRUB itself stays completely unmodified
-   otherwise - short/no timeout, no menu changes, no touch support added to
-   GRUB). This is the *only* GRUB-facing piece of the whole project. Sets
-   `--id picker` so `initramfs/discover-kernels.sh` can exclude it from the
-   list it hands to the touch menu. Paths are placeholders until
-   `picker-kernel`/`initramfs` build outputs land somewhere real under
-   `/boot`.
+1. **The GRUB entry** (`grub-picker-entry.cfg`) - the only GRUB-facing
+   piece of the whole project, no other changes to GRUB itself. Not made
+   the default/only boot path until the picker has proven itself (Bob's
+   call - see the file's own comments for the rollout plan): lands first
+   as a plain selectable entry alongside GRUB's normal menu/timeout,
+   only later flipped to `GRUB_DEFAULT=picker`/`GRUB_TIMEOUT=0` once
+   reliable. Sets `--id picker` so `initramfs/discover-kernels.sh` can
+   exclude it from the list it hands to the touch menu. Paths are
+   placeholders until `picker-kernel`/`initramfs` build outputs land
+   somewhere real under `/boot`.
 2. **The kexec glue** (`kexec-boot.sh`): given a selected real kernel's
    linux/initrd paths (as they appear in `grub.cfg`) and cmdline, from
    `initramfs/discover-kernels.sh` via `initramfs/init`, runs `kexec -l`
