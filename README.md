@@ -83,18 +83,25 @@ report back -> adjust) suits a live channel better than documents.
    binder, storage/network drivers, anything not needed to draw a menu and
    `kexec`. Lives in BobZKernel's repo, not this one - see `picker-kernel/`
    here for how it plugs into this project.
+2. **Touch UI rendering**: raw DRM+fbdev, no SDL/LVGL. The menu is a static
+   list + a confirm step, not rich graphics - a heavier toolkit buys little
+   here, and `ui/`'s privileged pre-boot environment makes a smaller
+   dependency footprint a real security property, not just a nice-to-have.
+3. **Boot entry discovery**: parse the real GRUB config live, not a
+   picker-owned config file. A stale picker-owned file is actively
+   dangerous here (offers a kernel that's gone, or silently omits a new
+   one); parsing live state stays correct by construction, same reasoning
+   as decision #1. First pass lives in `initramfs/discover-kernels.sh` -
+   assumes `GRUB_DISABLE_SUBMENU=true` upstream so every real kernel entry
+   is a flat top-level `menuentry` (see `boot-integration/`), and still
+   needs validating against the Slate's actual generated `grub.cfg`.
 
 ## Open questions - not yet decided, resolve these next
 
-2. **Touch UI rendering**: raw DRM+fbdev drawing (smallest, most control,
-   most manual work) vs. pulling in something like a tiny SDL or LVGL setup
-   (faster to build a real UI, bigger initramfs, another dependency to keep
-   minimal/secure in a privileged pre-boot environment).
-3. **Boot entry discovery**: parse the real GRUB config / BLS entries that
-   already exist on the Slate's `/boot` (always in sync with reality, but
-   depends on a stable/parseable format) vs. a simple config file the picker
-   owns and someone updates when kernels change (simpler code, can drift out
-   of sync with what's actually installed).
+None currently - all three original open questions are decided (see
+Decisions above). Next real milestone is on-device validation: does
+`discover-kernels.sh` correctly parse the Slate's real `grub.cfg`, and does
+the stripped `picker-kernel` branch still have working touch + display.
 
 ## Directory layout
 

@@ -1,0 +1,28 @@
+#!/bin/sh
+# PID 1 for the picker initramfs: bring up just enough of the system to
+# read /boot, discover real kernels, run the touch menu, and kexec.
+
+mount -t proc none /proc
+mount -t sysfs none /sys
+mount -t devtmpfs none /dev
+mkdir -p /dev/pts
+mount -t devpts none /dev/pts
+
+mdev -s
+
+mkdir -p /run/picker /mnt/root
+
+# The partition holding the real grub.cfg and real kernels. Needs
+# confirming against the Slate's actual /boot layout (on-device task) -
+# by-label is a placeholder until that's verified.
+: "${REAL_BOOT_DEV:=/dev/disk/by-label/boot}"
+mount -o ro "$REAL_BOOT_DEV" /mnt/root
+
+/bin/discover-kernels.sh /mnt/root/grub/grub.cfg > /run/picker/menu.tsv
+
+/bin/picker /run/picker/menu.tsv > /run/picker/selected
+
+# Sets SELECTED_LINUX, SELECTED_INITRD, SELECTED_CMDLINE.
+. /run/picker/selected
+
+exec /sbin/kexec-boot.sh /mnt/root "$SELECTED_LINUX" "$SELECTED_INITRD" "$SELECTED_CMDLINE"

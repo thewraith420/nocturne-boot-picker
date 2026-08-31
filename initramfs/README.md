@@ -4,13 +4,23 @@ The root filesystem the picker kernel boots into: just enough userspace to
 bring up the display, read touch input, render the menu, and call `kexec -e`
 on selection.
 
-Not started. Needs, at minimum:
-- `kexec-tools` (`kexec -l` the selected real kernel + its initrd/cmdline,
-  then `kexec -e` to jump to it)
-- Whatever the chosen touch-UI approach needs (see main README open
-  question #2 - raw DRM+fbdev vs. a small SDL/LVGL setup)
-- Enough of `/dev`, `/proc`, `/sys` populated to make DRM/input actually work
-  (likely a minimal `mdev`/`udev`-lite setup or a static device table)
+**In place:**
+- `init` - PID 1: mounts `/proc` `/sys` `/dev`, runs `mdev -s`, mounts the
+  real boot partition read-only, runs discovery, runs the UI, hands the
+  selection to `boot-integration/kexec-boot.sh`.
+- `discover-kernels.sh` - parses a GRUB config for top-level `menuentry`
+  stanzas (assumes `GRUB_DISABLE_SUBMENU=true`, see
+  `boot-integration/grub-picker-entry.cfg`) into a `title\tlinux\tinitrd\tcmdline`
+  list, excluding the picker's own entry (`--id picker`). Verified against
+  a representative synthetic `grub.cfg`, not yet against the Slate's real
+  one - on-device task.
 
-Boot entry discovery (main README open question #3) also lives here
-conceptually - whatever reads/owns the list of real kernels to offer.
+**Not started:**
+- `mdev.conf` / static `/dev` table for the touch + DRM devices
+- the `picker` UI binary itself (`ui/`, raw DRM+fbdev - see main README
+  decision #2)
+- an actual `REAL_BOOT_DEV` value in `init` - currently a
+  `/dev/disk/by-label/boot` placeholder, needs the real device/label
+  confirmed on hardware
+- the build script that assembles all of this plus `kexec-tools` and
+  busybox into a cpio image
