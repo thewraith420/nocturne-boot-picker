@@ -5,22 +5,21 @@ bring up the display, read touch input, render the menu, and call `kexec -e`
 on selection.
 
 **In place:**
-- `init` - PID 1: mounts `/proc` `/sys` `/dev`, runs `mdev -s`, mounts the
-  real boot partition read-only, runs discovery, runs the UI, hands the
-  selection to `boot-integration/kexec-boot.sh`.
+- `init` - PID 1: mounts `/proc` `/sys` `/dev`, mounts the real root
+  partition (`/dev/mmcblk0p2`, ext4 - confirmed on hardware, no separate
+  `/boot` mount, no LABEL) read-only, runs discovery against
+  `/boot/grub/grub.cfg` on it, runs the UI, hands the selection to
+  `boot-integration/kexec-boot.sh`.
 - `discover-kernels.sh` - parses a GRUB config for top-level `menuentry`
   stanzas (assumes `GRUB_DISABLE_SUBMENU=true`, see
   `boot-integration/grub-picker-entry.cfg`) into a `title\tlinux\tinitrd\tcmdline`
   list, excluding the picker's own entry (`--id picker`). Verified against
-  a representative synthetic `grub.cfg`, not yet against the Slate's real
-  one - on-device task.
+  a representative synthetic `grub.cfg`; testing against the Slate's real
+  27KB one is next.
 
 **Not started:**
 - `mdev.conf` / static `/dev` table for the touch + DRM devices
 - the `picker` UI binary itself (`ui/`, raw DRM+fbdev - see main README
   decision #2)
-- an actual `REAL_BOOT_DEV` value in `init` - currently a
-  `/dev/disk/by-label/boot` placeholder, needs the real device/label
-  confirmed on hardware
 - the build script that assembles all of this plus `kexec-tools` and
   busybox into a cpio image
