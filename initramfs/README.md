@@ -10,12 +10,14 @@ on selection.
   `/boot` mount, no LABEL) read-only, runs discovery against
   `/boot/grub/grub.cfg` on it, runs the UI, hands the selection to
   `boot-integration/kexec-boot.sh`.
-- `discover-kernels.sh` - parses a GRUB config for top-level `menuentry`
-  stanzas (assumes `GRUB_DISABLE_SUBMENU=true`, see
-  `boot-integration/grub-picker-entry.cfg`) into a `title\tlinux\tinitrd\tcmdline`
-  list, excluding the picker's own entry (`--id picker`). Verified against
-  a representative synthetic `grub.cfg`; testing against the Slate's real
-  27KB one is next.
+- `discover-kernels.sh` - parses a GRUB config for `menuentry` stanzas at
+  any nesting depth (real kernels turned out to live inside an "Advanced
+  options" submenu, not flat - see `docs/nocturne-grub.cfg`) into a
+  `title\tlinux\tinitrd\tcmdline` list, filtered to entries whose `linux`
+  line points at a `vmlinuz` image (excludes memtest86+ and similar
+  non-kernel entries) and excluding the picker's own entry (`--id
+  picker`). Verified against the real grub.cfg pulled from the Slate -
+  correctly extracts all 25 real kernel entries.
 
 **Not started:**
 - `mdev.conf` / static `/dev` table for the touch + DRM devices

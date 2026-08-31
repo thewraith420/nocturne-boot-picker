@@ -91,10 +91,14 @@ report back -> adjust) suits a live channel better than documents.
    picker-owned config file. A stale picker-owned file is actively
    dangerous here (offers a kernel that's gone, or silently omits a new
    one); parsing live state stays correct by construction, same reasoning
-   as decision #1. First pass lives in `initramfs/discover-kernels.sh` -
-   assumes `GRUB_DISABLE_SUBMENU=true` upstream so every real kernel entry
-   is a flat top-level `menuentry` (see `boot-integration/`), and still
-   needs validating against the Slate's actual generated `grub.cfg`.
+   as decision #1. `initramfs/discover-kernels.sh` walks `menuentry`
+   stanzas at any nesting depth (real-world testing against the Slate's
+   actual `grub.cfg` showed kernels sit inside an "Advanced options"
+   submenu, not flat - no GRUB config changes needed to handle that),
+   filters to entries whose `linux` line actually points at a `vmlinuz`
+   image (excludes non-kernel entries like memtest86+), and excludes the
+   picker's own entry (`--id picker`). Verified against the real 25-entry
+   `grub.cfg` pulled from the Slate (`docs/nocturne-grub.cfg`).
 
 ## Open questions - not yet decided, resolve these next
 
