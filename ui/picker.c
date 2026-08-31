@@ -569,6 +569,7 @@ int main(int argc, char **argv) {
     int sig_fd = signalfd_setup();
     int timer_fd = -1;
     int seconds_left = timeout_secs;
+    int countdown_cancelled = 0;
     if (timeout_secs > 0) {
         timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
         struct itimerspec its = {.it_value = {.tv_sec = 1}, .it_interval = {.tv_sec = 1}};
@@ -651,8 +652,9 @@ int main(int argc, char **argv) {
                     }
                 } else if (ev.type == EV_KEY && ev.code == BTN_TOUCH) {
                     ctx.touch_down = ev.value;
-                    if (ev.value && timer_fd >= 0 && seconds_left == timeout_secs) {
+                    if (ev.value && timer_fd >= 0 && !countdown_cancelled) {
                         /* first touch: cancel the auto-boot countdown */
+                        countdown_cancelled = 1;
                         struct itimerspec off = {0};
                         timerfd_settime(timer_fd, 0, &off, NULL);
                         if (countdown_label) lv_label_set_text(countdown_label, "");
