@@ -1,33 +1,37 @@
 /*
  * picker: the touch menu itself. Reads a menu.tsv (produced by
  * initramfs/discover-kernels.sh) of "title\tlinux\tinitrd\tcmdline"
- * lines, draws it on the first connected DRM output using raw
- * KMS + a dumb buffer (no compositor, no libinput - see main
- * README decision #2), waits for tap-then-confirm on one entry
- * (TWRP-style, see ui/README.md), and writes the selection back out
- * as shell-sourceable SELECTED_LINUX/SELECTED_INITRD/SELECTED_CMDLINE
- * assignments on stdout for initramfs/init to `.` source.
+ * lines, draws a TWRP-style list on the first connected DRM output
+ * using LVGL (main README decision #2, reopened after real-hardware
+ * feedback that a plain text list wasn't the goal - see ui/README.md),
+ * waits for tap -> confirm-dialog -> confirm on one entry, and writes
+ * the selection back out as shell-sourceable
+ * SELECTED_LINUX/SELECTED_INITRD/SELECTED_CMDLINE assignments on
+ * stdout for initramfs/init to `.` source.
  *
- * Text is rendered from a real PSF2 console font (ui/font.psf, from
- * the standard `kbd` package's Lat38-VGA28x16) rather than a hand-
- * authored bitmap table - one less place to introduce silent,
- * hard-to-spot pixel-data mistakes.
+ * LVGL is deliberately kept rotation-agnostic (lv_display_set_rotation
+ * is never called): testing showed LVGL's own rotation support hands
+ * flush_cb a buffer still laid out in *logical* (unrotated) space, and
+ * separately hangs outright when combined with
+ * LV_DISPLAY_RENDER_MODE_FULL. Rather than depend on that and a second,
+ * possibly differently-conventioned rotation implementation inside
+ * LVGL, PICKER_ROTATE is handled by this file's own logical_to_physical
+ * / physical_to_logical transform (bijectivity verified with a
+ * standalone test harness) at exactly two points: the flush callback
+ * (logical LVGL render -> physical framebuffer) and touch input
+ * (physical touch digitizer -> logical LVGL coordinates). LVGL's own
+ * display is created at the already-swapped *logical* resolution and
+ * never told about rotation at all.
  *
  * Safety net: if nothing is tapped within PICKER_TIMEOUT_SECS (default
- * 10, 0 disables it), auto-boots the first entry - this is meant to
- * replace GRUB's own menu, which has exactly this timeout-to-default
- * behavior, and a keyboardless device with no escape hatch otherwise
- * has no recovery path if touch ever fails to register. Also
- * cooperates with VT-switch requests (VT_SETMODE/signalfd, dropping
- * and reacquiring DRM master) so a foreground console switch during
- * development/debugging doesn't wedge the display - found by testing
- * on real hardware: without this, Ctrl+Alt+F1 hung the VT switch hard
- * enough to need a power cycle to recover.
- *
- * PICKER_ROTATE=0|90|180|270 (default 0) rotates rendered content and
- * touch coordinates together to match the panel's physical mounting
- * orientation - needed because there's no kernel-side panel-rotation
- * quirk for this hardware, so it has to be handled here.
+ * 10, 0 disables it), auto-boots the first entry - GRUB's own menu has
+ * exactly this timeout-to-default behavior, and a keyboardless device
+ * with no escape hatch otherwise has no recovery path if touch ever
+ * fails to register. Also cooperates with VT-switch requests
+ * (VT_SETMODE/signalfd, dropping and reacquiring DRM master) so a
+ * foreground console switch during development/debugging doesn't wedge
+ * the display - found by testing on real hardware: without this,
+ * Ctrl+Alt+F1 hung the VT switch hard enough to need a power cycle.
  */
 
 #include <dirent.h>
@@ -45,20 +49,18 @@
 #include <sys/mman.h>
 #include <sys/signalfd.h>
 #include <sys/timerfd.h>
+#include <time.h>
 #include <unistd.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
+#include "lvgl.h"
+
 #define MAX_ENTRIES 128
-#define FONT_SCALE 3
-#define ROW_HEIGHT (28 * FONT_SCALE + 24)
-#define COLOR_BG 0x101010u
-#define COLOR_TEXT 0xe0e0e0u
-#define COLOR_ROW_ALT 0x181818u
-#define COLOR_PENDING 0x203a5cu
 #define DEFAULT_TIMEOUT_SECS 10
 #define VT_RELEASE_SIG SIGUSR1
 #define VT_ACQUIRE_SIG SIGUSR2
+#define POLL_PERIOD_MS 30
 
 struct entry {
     char title[256];
@@ -97,7 +99,7 @@ static int load_entries(const char *path, struct entry *entries, int max) {
     return n;
 }
 
-/* ---------------- rotation ---------------- */
+/* ---------------- rotation (see file header - LVGL is not told about this) ---------------- */
 
 enum { ROT_0, ROT_90, ROT_180, ROT_270 };
 
@@ -110,8 +112,9 @@ static int parse_rotation(void) {
     return ROT_0;
 }
 
-/* Maps a point in the unrotated "logical" canvas (cw x ch) to the
- * physical framebuffer (ch x cw for 90/270, cw x ch for 0/180). */
+/* Logical (LVGL's render space, cw x ch) -> physical framebuffer
+ * (ch x cw for 90/270, cw x ch for 0/180). Verified bijective with
+ * clean round-trips for all four values via a standalone test harness. */
 static void logical_to_physical(int rot, int cw, int ch, int lx, int ly, int *px, int *py) {
     switch (rot) {
     case ROT_90:  *px = ch - 1 - ly; *py = lx; break;
@@ -121,116 +124,12 @@ static void logical_to_physical(int rot, int cw, int ch, int lx, int ly, int *px
     }
 }
 
-/* Inverse of logical_to_physical, for turning touch coordinates
- * (which arrive in physical panel space) back into logical space for
- * hit-testing against the (logical-space) row layout. */
 static void physical_to_logical(int rot, int cw, int ch, int px, int py, int *lx, int *ly) {
     switch (rot) {
     case ROT_90:  *lx = py;          *ly = ch - 1 - px; break;
     case ROT_180: *lx = cw - 1 - px; *ly = ch - 1 - py; break;
     case ROT_270: *lx = cw - 1 - py; *ly = px;          break;
     default:      *lx = px;          *ly = py;          break;
-    }
-}
-
-/* ---------------- PSF font ---------------- */
-
-struct font {
-    unsigned char *glyphs;
-    unsigned width, height, bytes_per_glyph, num_glyphs;
-};
-
-static uint32_t rd32(const unsigned char *p) {
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
-static int font_load(struct font *f, const char *path) {
-    FILE *fp = fopen(path, "rb");
-    if (!fp) {
-        fprintf(stderr, "picker: cannot open font %s: %s\n", path, strerror(errno));
-        return -1;
-    }
-    unsigned char hdr[32];
-    if (fread(hdr, 1, 2, fp) != 2) { fclose(fp); return -1; }
-
-    if (hdr[0] == 0x36 && hdr[1] == 0x04) {
-        unsigned char rest[2];
-        if (fread(rest, 1, 2, fp) != 2) { fclose(fp); return -1; }
-        f->width = 8;
-        f->height = rest[1];
-        f->bytes_per_glyph = rest[1];
-        f->num_glyphs = (rest[0] & 1) ? 512 : 256;
-    } else {
-        if (fread(hdr + 2, 1, 30, fp) != 30) { fclose(fp); return -1; }
-        if (rd32(hdr) != 0x864ab572u) {
-            fprintf(stderr, "picker: %s is not a PSF1/PSF2 font\n", path);
-            fclose(fp);
-            return -1;
-        }
-        uint32_t headersize = rd32(hdr + 8);
-        f->num_glyphs = rd32(hdr + 16);
-        f->bytes_per_glyph = rd32(hdr + 20);
-        f->height = rd32(hdr + 24);
-        f->width = rd32(hdr + 28);
-        if (fseek(fp, headersize, SEEK_SET) != 0) { fclose(fp); return -1; }
-    }
-
-    size_t total = (size_t)f->bytes_per_glyph * f->num_glyphs;
-    f->glyphs = malloc(total);
-    if (!f->glyphs || fread(f->glyphs, 1, total, fp) != total) {
-        free(f->glyphs);
-        fclose(fp);
-        return -1;
-    }
-    fclose(fp);
-    return 0;
-}
-
-/* ---------------- drawing (logical-space, rotation-aware) ---------------- */
-
-struct canvas {
-    uint8_t *fb;
-    uint32_t stride;
-    uint32_t phys_w, phys_h;
-    int rot;
-    int w, h; /* logical dimensions */
-};
-
-static void putpixel(struct canvas *cv, int lx, int ly, uint32_t color) {
-    if (lx < 0 || ly < 0 || lx >= cv->w || ly >= cv->h) return;
-    int px, py;
-    logical_to_physical(cv->rot, cv->w, cv->h, lx, ly, &px, &py);
-    if (px < 0 || py < 0 || (uint32_t)px >= cv->phys_w || (uint32_t)py >= cv->phys_h) return;
-    uint32_t *rowptr = (uint32_t *)(cv->fb + (size_t)py * cv->stride);
-    rowptr[px] = color;
-}
-
-static void fill_rect(struct canvas *cv, int x, int y, int w, int h, uint32_t color) {
-    for (int ly = y; ly < y + h; ly++)
-        for (int lx = x; lx < x + w; lx++)
-            putpixel(cv, lx, ly, color);
-}
-
-static void draw_glyph(struct canvas *cv, const struct font *f, unsigned char c, int x, int y, uint32_t color) {
-    if (c >= f->num_glyphs) return;
-    unsigned bytes_per_row = f->bytes_per_glyph / f->height;
-    const unsigned char *g = f->glyphs + (size_t)c * f->bytes_per_glyph;
-    for (unsigned row = 0; row < f->height; row++) {
-        for (unsigned col = 0; col < f->width; col++) {
-            unsigned char byte = g[row * bytes_per_row + col / 8];
-            if (!(byte & (0x80 >> (col % 8)))) continue;
-            for (int sy = 0; sy < FONT_SCALE; sy++)
-                for (int sx = 0; sx < FONT_SCALE; sx++)
-                    putpixel(cv, x + (int)col * FONT_SCALE + sx, y + (int)row * FONT_SCALE + sy, color);
-        }
-    }
-}
-
-static void draw_text(struct canvas *cv, const struct font *f, const char *s, int x, int y, uint32_t color) {
-    int cx = x;
-    for (; *s; s++) {
-        draw_glyph(cv, f, (unsigned char)*s, cx, y, color);
-        cx += ((int)f->width + 2) * FONT_SCALE;
     }
 }
 
@@ -466,10 +365,10 @@ static int touch_open(struct touch_dev *t) {
 }
 
 /* Raw touch device coordinates arrive in the panel's fixed physical
- * orientation (the digitizer is laminated to the panel), independent
- * of how we choose to rotate rendered content - so this scales into
- * physical framebuffer space first, then applies the same rotation
- * used for drawing (inverted) to land in logical space for hit_test. */
+ * orientation (the digitizer is laminated to the panel) - scale into
+ * physical framebuffer space first, then into LVGL's logical space via
+ * physical_to_logical (see file header on why LVGL itself is never
+ * told about rotation). */
 static void touch_to_logical(const struct touch_dev *t, int rot, int cw, int ch,
                               uint32_t phys_w, uint32_t phys_h, int raw_x, int raw_y, int *lx, int *ly) {
     int px = (t->abs_x.maximum > t->abs_x.minimum)
@@ -481,50 +380,115 @@ static void touch_to_logical(const struct touch_dev *t, int rot, int cw, int ch,
     physical_to_logical(rot, cw, ch, px, py, lx, ly);
 }
 
-/* ---------------- layout + rendering ---------------- */
+/* ---------------- LVGL display + input glue ---------------- */
 
-struct layout {
-    int x, y, w, h;
+struct picker_ctx {
+    struct drm_dev *drm;
+    int rot;
+    int cw, ch; /* logical dims, as passed to lv_display_create */
+    lv_indev_t *indev;
+    int touch_x, touch_y, touch_down;
 };
 
-static void compute_layout(struct layout *rows, int n, int cw, int ch) {
-    (void)ch;
-    int margin = cw / 40;
-    int y = ch / 10;
-    for (int i = 0; i < n; i++) {
-        rows[i].x = margin;
-        rows[i].y = y;
-        rows[i].w = cw - 2 * margin;
-        rows[i].h = ROW_HEIGHT - 8;
-        y += ROW_HEIGHT;
+static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
+    struct picker_ctx *ctx = lv_display_get_user_data(disp);
+    int w = area->x2 - area->x1 + 1;
+    uint32_t *src = (uint32_t *)px_map;
+    for (int ly = area->y1; ly <= area->y2; ly++) {
+        for (int lx = area->x1; lx <= area->x2; lx++) {
+            int px, py;
+            logical_to_physical(ctx->rot, ctx->cw, ctx->ch, lx, ly, &px, &py);
+            if (px < 0 || py < 0 || (uint32_t)px >= ctx->drm->width || (uint32_t)py >= ctx->drm->height) continue;
+            uint32_t color = src[(ly - area->y1) * w + (lx - area->x1)];
+            uint32_t *dst_row = (uint32_t *)(ctx->drm->map + (size_t)py * ctx->drm->stride);
+            dst_row[px] = color;
+        }
     }
+    lv_display_flush_ready(disp);
 }
 
-static void render(struct canvas *cv, const struct font *font, struct entry *entries, int n,
-                    struct layout *rows, int pending, int seconds_left) {
-    fill_rect(cv, 0, 0, cv->w, cv->h, COLOR_BG);
-    draw_text(cv, font, "Tap a kernel to select, tap again to boot it",
-              rows[0].x, rows[0].y - ROW_HEIGHT + 12, COLOR_TEXT);
-    if (seconds_left > 0) {
-        char msg[64];
-        snprintf(msg, sizeof(msg), "Booting default in %d...", seconds_left);
-        draw_text(cv, font, msg, rows[0].x, rows[0].y - ROW_HEIGHT + 12 + (int)font->height * FONT_SCALE + 8,
-                  COLOR_TEXT);
-    }
-    for (int i = 0; i < n; i++) {
-        uint32_t bg = (i == pending) ? COLOR_PENDING : (i % 2 ? COLOR_ROW_ALT : COLOR_BG);
-        fill_rect(cv, rows[i].x, rows[i].y, rows[i].w, rows[i].h, bg);
-        draw_text(cv, font, entries[i].title, rows[i].x + 16,
-                  rows[i].y + (rows[i].h - (int)font->height * FONT_SCALE) / 2, COLOR_TEXT);
-    }
+static void indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
+    struct picker_ctx *ctx = lv_indev_get_user_data(indev);
+    data->point.x = ctx->touch_x;
+    data->point.y = ctx->touch_y;
+    data->state = ctx->touch_down ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
 }
 
-static int hit_test(struct layout *rows, int n, int x, int y) {
-    for (int i = 0; i < n; i++) {
-        if (x >= rows[i].x && x < rows[i].x + rows[i].w && y >= rows[i].y && y < rows[i].y + rows[i].h)
-            return i;
+/* ---------------- UI ---------------- */
+
+static volatile int g_selected = -1;
+static struct entry *g_entries;
+
+/* Nothing else to do here: the main loop exits as soon as g_selected
+ * is set (checked right after this fires, since click handling happens
+ * inside lv_timer_handler()), so there's no need to close the msgbox -
+ * the whole display is torn down immediately after anyway. */
+static void confirm_cb(lv_event_t *e) {
+    lv_obj_t *mbox = lv_event_get_user_data(e);
+    g_selected = (int)(intptr_t)lv_obj_get_user_data(mbox);
+}
+
+static void cancel_cb(lv_event_t *e) {
+    lv_msgbox_close_async(lv_event_get_user_data(e));
+}
+
+static void row_click_cb(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+
+    lv_obj_t *mbox = lv_msgbox_create(NULL);
+    lv_obj_set_user_data(mbox, (void *)(intptr_t)idx);
+    lv_msgbox_add_title(mbox, "Confirm boot");
+    char body[300];
+    snprintf(body, sizeof(body), "Boot into:\n\n%s", g_entries[idx].title);
+    lv_msgbox_add_text(mbox, body);
+    lv_obj_t *confirm_btn = lv_msgbox_add_footer_button(mbox, "Boot");
+    lv_obj_t *cancel_btn = lv_msgbox_add_footer_button(mbox, "Cancel");
+    lv_obj_add_event_cb(confirm_btn, confirm_cb, LV_EVENT_CLICKED, mbox);
+    lv_obj_add_event_cb(cancel_btn, cancel_cb, LV_EVENT_CLICKED, mbox);
+}
+
+static void build_ui(struct entry *entries, int n, int timeout_secs, lv_obj_t **countdown_label_out) {
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x101418), 0);
+    lv_obj_set_flex_flow(scr, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(scr, 16, 0);
+    lv_obj_set_style_pad_row(scr, 10, 0);
+
+    lv_obj_t *header = lv_label_create(scr);
+    lv_label_set_text(header, LV_SYMBOL_POWER "  Select a kernel to boot");
+    lv_obj_set_style_text_color(header, lv_color_hex(0x8ec6ff), 0);
+
+    if (timeout_secs > 0) {
+        lv_obj_t *cd = lv_label_create(scr);
+        lv_obj_set_style_text_color(cd, lv_color_hex(0x808a94), 0);
+        *countdown_label_out = cd;
+    } else {
+        *countdown_label_out = NULL;
     }
-    return -1;
+
+    lv_obj_t *list = lv_obj_create(scr);
+    lv_obj_set_width(list, lv_pct(100));
+    lv_obj_set_flex_grow(list, 1);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(list, 8, 0);
+    lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(list, 0, 0);
+
+    for (int i = 0; i < n; i++) {
+        lv_obj_t *btn = lv_button_create(list);
+        lv_obj_set_width(btn, lv_pct(100));
+        lv_obj_set_height(btn, 84);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x1c2530), 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x2a3a4d), LV_STATE_PRESSED);
+        lv_obj_set_style_radius(btn, 10, 0);
+
+        lv_obj_t *label = lv_label_create(btn);
+        lv_label_set_text_fmt(label, LV_SYMBOL_USB "  %s", entries[i].title);
+        lv_obj_set_style_text_color(label, lv_color_hex(0xe8eef4), 0);
+        lv_obj_center(label);
+
+        lv_obj_add_event_cb(btn, row_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+    }
 }
 
 static void shell_quote(FILE *out, const char *name, const char *value) {
@@ -540,10 +504,9 @@ static void shell_quote(FILE *out, const char *name, const char *value) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <menu.tsv> [font.psf]\n", argv[0]);
+        fprintf(stderr, "usage: %s <menu.tsv>\n", argv[0]);
         return 2;
     }
-    const char *font_path = argc > 2 ? argv[2] : "/etc/picker-font.psf";
 
     int timeout_secs = DEFAULT_TIMEOUT_SECS;
     const char *timeout_env = getenv("PICKER_TIMEOUT_SECS");
@@ -555,9 +518,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "picker: no kernel entries found in %s\n", argv[1]);
         return 1;
     }
-
-    struct font font;
-    if (font_load(&font, font_path) != 0) return 1;
+    g_entries = entries;
 
     struct drm_dev drm;
     if (drm_open_first_connected(&drm) != 0) {
@@ -565,26 +526,44 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    int rot = parse_rotation();
-    struct canvas cv = {
-        .fb = drm.map,
-        .stride = drm.stride,
-        .phys_w = drm.width,
-        .phys_h = drm.height,
-        .rot = rot,
-        .w = (rot == ROT_90 || rot == ROT_270) ? (int)drm.height : (int)drm.width,
-        .h = (rot == ROT_90 || rot == ROT_270) ? (int)drm.width : (int)drm.height,
-    };
-
-    struct layout rows[MAX_ENTRIES];
-    compute_layout(rows, n, cv.w, cv.h);
-
     struct touch_dev touch;
     if (touch_open(&touch) != 0) {
         fprintf(stderr, "picker: no touch input device found\n");
         drm_close(&drm);
         return 1;
     }
+
+    int rot = parse_rotation();
+    struct picker_ctx ctx = {
+        .drm = &drm,
+        .rot = rot,
+        .cw = (rot == ROT_90 || rot == ROT_270) ? (int)drm.height : (int)drm.width,
+        .ch = (rot == ROT_90 || rot == ROT_270) ? (int)drm.width : (int)drm.height,
+    };
+
+    lv_init();
+    lv_display_t *disp = lv_display_create(ctx.cw, ctx.ch);
+    lv_display_set_user_data(disp, &ctx);
+    lv_display_set_flush_cb(disp, flush_cb);
+    size_t buf_size = (size_t)ctx.cw * 64 * 4; /* partial buffer, 64 logical rows */
+    void *lvgl_buf = malloc(buf_size);
+    if (!lvgl_buf) {
+        fprintf(stderr, "picker: out of memory allocating LVGL draw buffer\n");
+        drm_close(&drm);
+        return 1;
+    }
+    lv_display_set_buffers(disp, lvgl_buf, NULL, buf_size, LV_DISPLAY_RENDER_MODE_PARTIAL);
+    lv_theme_t *theme = lv_theme_default_init(disp, lv_color_hex(0x3d7ee8), lv_color_hex(0x8ec6ff), true, LV_FONT_DEFAULT);
+    lv_display_set_theme(disp, theme);
+
+    lv_indev_t *indev = lv_indev_create();
+    lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_read_cb(indev, indev_read_cb);
+    lv_indev_set_user_data(indev, &ctx);
+    ctx.indev = indev;
+
+    lv_obj_t *countdown_label = NULL;
+    build_ui(entries, n, timeout_secs, &countdown_label);
 
     int vt_fd = vt_setup();
     int sig_fd = signalfd_setup();
@@ -594,27 +573,35 @@ int main(int argc, char **argv) {
         timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
         struct itimerspec its = {.it_value = {.tv_sec = 1}, .it_interval = {.tv_sec = 1}};
         if (timer_fd >= 0) timerfd_settime(timer_fd, 0, &its, NULL);
+        if (countdown_label) {
+            lv_label_set_text_fmt(countdown_label, "Booting default in %ds - tap to choose", seconds_left);
+        }
     }
 
-    int pending = -1;
-    int selected = -1;
-    int cur_x = -1, cur_y = -1, down = 0, was_down = 0;
     int have_master = 1;
+    struct timespec last_tick;
+    clock_gettime(CLOCK_MONOTONIC, &last_tick);
 
-    render(&cv, &font, entries, n, rows, pending, seconds_left);
+    lv_timer_handler();
 
     struct pollfd fds[3];
-    while (selected < 0) {
+    while (g_selected < 0) {
         int nfds = 0;
         int touch_idx = -1, sig_idx = -1, timer_idx = -1;
         fds[nfds].fd = touch.fd; fds[nfds].events = POLLIN; touch_idx = nfds++;
         if (sig_fd >= 0) { fds[nfds].fd = sig_fd; fds[nfds].events = POLLIN; sig_idx = nfds++; }
         if (timer_fd >= 0) { fds[nfds].fd = timer_fd; fds[nfds].events = POLLIN; timer_idx = nfds++; }
 
-        int pr = poll(fds, nfds, -1);
-        if (pr < 0) {
-            if (errno == EINTR) continue;
-            break;
+        int pr = poll(fds, nfds, POLL_PERIOD_MS);
+        if (pr < 0 && errno != EINTR) break;
+
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        uint32_t elapsed_ms = (uint32_t)((now.tv_sec - last_tick.tv_sec) * 1000 +
+                                          (now.tv_nsec - last_tick.tv_nsec) / 1000000);
+        if (elapsed_ms > 0) {
+            lv_tick_inc(elapsed_ms);
+            last_tick = now;
         }
 
         if (sig_idx >= 0 && (fds[sig_idx].revents & POLLIN)) {
@@ -628,7 +615,7 @@ int main(int argc, char **argv) {
                     if (drmSetMaster(drm.fd) == 0) {
                         have_master = 1;
                         drmModeSetCrtc(drm.fd, drm.crtc_id, drm.fb_id, 0, 0, &drm.conn_id, 1, &drm.mode);
-                        render(&cv, &font, entries, n, rows, pending, seconds_left);
+                        lv_obj_invalidate(lv_screen_active());
                     }
                     if (vt_fd >= 0) ioctl(vt_fd, VT_RELDISP, VT_ACKACQ);
                 }
@@ -640,51 +627,41 @@ int main(int argc, char **argv) {
             if (read(timer_fd, &ticks, sizeof(ticks)) == (ssize_t)sizeof(ticks)) {
                 seconds_left -= (int)ticks;
                 if (seconds_left <= 0) {
-                    selected = 0;
-                } else if (have_master) {
-                    render(&cv, &font, entries, n, rows, pending, seconds_left);
+                    g_selected = 0;
+                } else if (countdown_label) {
+                    lv_label_set_text_fmt(countdown_label, "Booting default in %ds - tap to choose", seconds_left);
                 }
             }
         }
-
-        if (selected >= 0) break;
+        if (g_selected >= 0) break;
 
         if (fds[touch_idx].revents & POLLIN) {
             struct input_event ev;
+            static int last_raw_x = -1, last_raw_y = -1;
             while (read(touch.fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
                 if (ev.type == EV_ABS) {
-                    if (ev.code == touch.code_x) cur_x = ev.value;
-                    else if (ev.code == touch.code_y) cur_y = ev.value;
+                    if (ev.code == touch.code_x) last_raw_x = ev.value;
+                    else if (ev.code == touch.code_y) last_raw_y = ev.value;
+                    if (last_raw_x >= 0 && last_raw_y >= 0) {
+                        int lx, ly;
+                        touch_to_logical(&touch, rot, ctx.cw, ctx.ch, drm.width, drm.height,
+                                          last_raw_x, last_raw_y, &lx, &ly);
+                        ctx.touch_x = lx;
+                        ctx.touch_y = ly;
+                    }
                 } else if (ev.type == EV_KEY && ev.code == BTN_TOUCH) {
-                    down = ev.value;
-                } else if (ev.type == EV_SYN && ev.code == SYN_REPORT) {
-                    if (have_master && down && timer_fd >= 0 && seconds_left > 0) {
-                        /* first interaction: cancel the auto-boot timeout */
+                    ctx.touch_down = ev.value;
+                    if (ev.value && timer_fd >= 0 && seconds_left == timeout_secs) {
+                        /* first touch: cancel the auto-boot countdown */
                         struct itimerspec off = {0};
                         timerfd_settime(timer_fd, 0, &off, NULL);
-                        seconds_left = 0;
-                        if (have_master) render(&cv, &font, entries, n, rows, pending, 0);
+                        if (countdown_label) lv_label_set_text(countdown_label, "");
                     }
-                    /* Ignore taps while the VT (and so the display) isn't
-                     * ours - a selection made on a screen the user can't
-                     * see would be surprising at best. */
-                    if (have_master && was_down && !down && cur_x >= 0 && cur_y >= 0) {
-                        int lx, ly;
-                        touch_to_logical(&touch, rot, cv.w, cv.h, drm.width, drm.height, cur_x, cur_y, &lx, &ly);
-                        int tapped = hit_test(rows, n, lx, ly);
-                        if (tapped >= 0) {
-                            if (tapped == pending) {
-                                selected = tapped;
-                            } else {
-                                pending = tapped;
-                                if (have_master) render(&cv, &font, entries, n, rows, pending, seconds_left);
-                            }
-                        }
-                    }
-                    was_down = down;
                 }
             }
         }
+
+        if (have_master) lv_timer_handler();
     }
 
     close(touch.fd);
@@ -692,14 +669,15 @@ int main(int argc, char **argv) {
     if (timer_fd >= 0) close(timer_fd);
     if (vt_fd >= 0) close(vt_fd);
     drm_close(&drm);
+    free(lvgl_buf);
 
-    if (selected < 0) {
+    if (g_selected < 0) {
         fprintf(stderr, "picker: touch input ended with no selection\n");
         return 1;
     }
 
-    shell_quote(stdout, "SELECTED_LINUX", entries[selected].linux_path);
-    shell_quote(stdout, "SELECTED_INITRD", entries[selected].initrd_path);
-    shell_quote(stdout, "SELECTED_CMDLINE", entries[selected].cmdline);
+    shell_quote(stdout, "SELECTED_LINUX", entries[g_selected].linux_path);
+    shell_quote(stdout, "SELECTED_INITRD", entries[g_selected].initrd_path);
+    shell_quote(stdout, "SELECTED_CMDLINE", entries[g_selected].cmdline);
     return 0;
 }

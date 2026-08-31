@@ -6,6 +6,10 @@ picker-kernel/linux-*/
 Module.symvers
 modules.order
 
+# LVGL (large, fetched via ui/fetch-lvgl.sh - not vendored, same convention as above)
+ui/lvgl/
+ui/picker
+
 # Built initramfs images
 initramfs/*.img
 initramfs/*.cpio*

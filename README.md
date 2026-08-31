@@ -83,10 +83,17 @@ report back -> adjust) suits a live channel better than documents.
    binder, storage/network drivers, anything not needed to draw a menu and
    `kexec`. Lives in BobZKernel's repo, not this one - see `picker-kernel/`
    here for how it plugs into this project.
-2. **Touch UI rendering**: raw DRM+fbdev, no SDL/LVGL. The menu is a static
-   list + a confirm step, not rich graphics - a heavier toolkit buys little
-   here, and `ui/`'s privileged pre-boot environment makes a smaller
-   dependency footprint a real security property, not just a nice-to-have.
+2. **Touch UI rendering**: LVGL (reopened after real-hardware feedback -
+   originally raw DRM+fbdev for the smaller dependency footprint, but
+   Bob wants a real TWRP look - icons, color, theming - once he saw the
+   plain-text version running, which isn't a good fit for hand-rolled
+   drawing code). Bigger initramfs and another dependency to vet, but
+   gets a real themed widget/dialog UI far faster than hand-rolling one.
+   Fetched at build time (`ui/fetch-lvgl.sh`, pinned v9.2.2), not
+   vendored - see `ui/README.md` for what real-hardware-testing-in-spirit
+   (via standalone harnesses, since this dev environment has no real
+   Slate/i915/touchscreen) already found, including a real LVGL
+   rotation gotcha worth knowing before touching that code again.
 3. **Boot entry discovery**: parse the real GRUB config live, not a
    picker-owned config file. A stale picker-owned file is actively
    dangerous here (offers a kernel that's gone, or silently omits a new
