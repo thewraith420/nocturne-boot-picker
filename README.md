@@ -72,14 +72,20 @@ project's back-and-forth, instead of the handoff-doc-file pattern used
 earlier in the BobZKernel work - this project's rhythm (test on hardware ->
 report back -> adjust) suits a live channel better than documents.
 
-## Open questions - not yet decided, resolve these first
+## Decisions
 
-1. **Kernel config**: reuse BobZKernel's existing pixel-slate kernel
-   config/build as a base for the picker (smaller diff to maintain, but a
-   bigger/slower initramfs and picker boot time), vs. a truly minimal,
-   separate kernel config built just for the picker (just DRM/KMS + i915,
-   i2c_hid + hid_multitouch, kexec-tools, nothing else - smallest/fastest
-   possible picker, but a second config to keep in sync over time).
+1. **Kernel config**: reuse BobZKernel's `pixel-slate` branch as the base,
+   on a dedicated `picker-kernel` branch forked from it (currently at
+   `5d8832c`). Inherits the load-bearing platform fixes for free - the i915
+   backlight quirks, the `hid_google_hammer` crash fix, the GOOG0007 button
+   fix - without polluting the real installed-kernel branch. From here the
+   config gets stripped down: drop camera/IPU3, v4l2loopback, Waydroid
+   binder, storage/network drivers, anything not needed to draw a menu and
+   `kexec`. Lives in BobZKernel's repo, not this one - see `picker-kernel/`
+   here for how it plugs into this project.
+
+## Open questions - not yet decided, resolve these next
+
 2. **Touch UI rendering**: raw DRM+fbdev drawing (smallest, most control,
    most manual work) vs. pulling in something like a tiny SDL or LVGL setup
    (faster to build a real UI, bigger initramfs, another dependency to keep
