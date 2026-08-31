@@ -1,0 +1,17 @@
+# Kernel source/build trees (large, fetched not vendored - mirrors BobZKernel's builds/ convention)
+picker-kernel/linux-*/
+*.o
+*.ko
+*.ko.zst
+Module.symvers
+modules.order
+
+# Built initramfs images
+initramfs/*.img
+initramfs/*.cpio*
+initramfs/build/
+initramfs/root/
+
+# Local scratch
+*.log
+*.swp
