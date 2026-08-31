@@ -32,6 +32,34 @@ on selection.
   non-kernel entries) and excluding the picker's own entry (`--id
   picker`). Verified against the real grub.cfg pulled from the Slate -
   correctly extracts all 25 real kernel entries.
+- `apply-default.sh` - reorders `discover-kernels.sh`'s output so a
+  previously "Set Default"-marked entry (see `ui/README.md`) is moved
+  to the front, if it's still present; a missing or stale marker just
+  passes the list through unchanged. This is the only place that needs
+  to know about a persisted preference - `ui/picker.c`'s auto-boot
+  timeout and `init`'s picker-failure fallback both already just take
+  "the first entry". Verified with a synthetic menu.tsv covering all
+  four cases: no marker, marker matches one entry, marker matches
+  multiple entries sharing a linux path (the "Ubuntu"/"Ubuntu, with
+  Linux X" pairing `discover-kernels.sh` already produces), marker
+  names a kernel that's since been removed.
+
+  Persisting the marker itself needs a brief `mount -o remount,rw` of
+  the real root (deliberately mounted read-only otherwise, to keep the
+  picker's normal blast radius small), done in `init` right before the final
+  `kexec-boot.sh` call, then `remount,ro` again immediately after.
+  Best-effort throughout: a failure at any step (remount fails, write
+  fails, remount-back-to-ro fails) just logs a warning and boots
+  anyway - saving a preference should never be able to block getting
+  to a working OS. The remount/write/remount sequence itself was
+  rehearsed against a real (throwaway, unprivileged-namespace) mount,
+  not just reasoned about - confirmed writes are genuinely blocked
+  while read-only, genuinely succeed after the read-write remount, and
+  are genuinely blocked again after remounting read-only a second
+  time. The full pipeline (first launch sets a default via the picker
+  UI, second simulated launch picks it up automatically with no user
+  interaction) was also verified end-to-end with mocked
+  discover-kernels.sh/picker/kexec-boot.sh.
 
 **Not started:**
 - `mdev.conf` / static `/dev` table for the touch + DRM devices

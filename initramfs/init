@@ -45,9 +45,15 @@ if ! mount -o ro "$REAL_ROOT_DEV" /mnt/root; then
     rescue "failed to mount real root ($REAL_ROOT_DEV)"
 fi
 
-if ! /bin/discover-kernels.sh /mnt/root/boot/grub/grub.cfg > /run/picker/menu.tsv || [ ! -s /run/picker/menu.tsv ]; then
+if ! /bin/discover-kernels.sh /mnt/root/boot/grub/grub.cfg > /run/picker/menu.tsv.raw || [ ! -s /run/picker/menu.tsv.raw ]; then
     rescue "no kernel entries found (discover-kernels.sh failed, or grub.cfg missing/empty)"
 fi
+
+# Moves a previously "Set Default"-marked entry to the front, if it's
+# still present - see apply-default.sh. A missing/stale marker just
+# passes the list through unchanged.
+DEFAULT_MARKER=/mnt/root/boot/picker-default
+/bin/apply-default.sh /run/picker/menu.tsv.raw "$DEFAULT_MARKER" > /run/picker/menu.tsv
 
 # Fallback target if the picker itself fails for any reason (no touch
 # device, no DRM output, crash, ...).
@@ -57,7 +63,8 @@ default_initrd=$(printf '%s' "$default_line" | cut -f3)
 default_cmdline=$(printf '%s' "$default_line" | cut -f4)
 
 if /bin/picker /run/picker/menu.tsv > /run/picker/selected; then
-    # Sets SELECTED_LINUX, SELECTED_INITRD, SELECTED_CMDLINE.
+    # Sets SELECTED_LINUX, SELECTED_INITRD, SELECTED_CMDLINE, and
+    # SET_DEFAULT=1 if "Set Default" was used.
     . /run/picker/selected
 else
     echo "picker: picker exited with an error - falling back to the default entry" >&2
@@ -75,6 +82,25 @@ fi
 
 if [ -z "$SELECTED_LINUX" ]; then
     rescue "no usable kernel entry to boot"
+fi
+
+# Persisting "Set Default" means briefly remounting the real root
+# read-write, which /mnt/root was deliberately mounted read-only to
+# avoid needing at all (keeps the picker's normal blast radius small -
+# see boot-integration/README.md). This is the one exception, and it's
+# best-effort: a failure here should never block booting into what the
+# user actually just chose, so every step just logs and moves on
+# rather than treating persistence as required.
+if [ "${SET_DEFAULT:-}" = "1" ]; then
+    if mount -o remount,rw /mnt/root; then
+        if ! printf '%s\n' "$SELECTED_LINUX" > "$DEFAULT_MARKER" 2>/dev/null; then
+            echo "picker: failed to write default preference (continuing anyway)" >&2
+        fi
+        mount -o remount,ro /mnt/root || \
+            echo "picker: failed to remount root read-only after saving default (continuing anyway)" >&2
+    else
+        echo "picker: failed to remount root read-write to save default preference (continuing anyway)" >&2
+    fi
 fi
 
 exec /sbin/kexec-boot.sh /mnt/root "$SELECTED_LINUX" "$SELECTED_INITRD" "$SELECTED_CMDLINE"

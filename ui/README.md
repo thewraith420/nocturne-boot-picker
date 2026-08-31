@@ -26,9 +26,21 @@ see `../.gitignore`).
   `EVIOCGABS` - not assumed 1:1 with framebuffer pixels.
 - Renders the kernel list as LVGL buttons in a themed dark UI (default
   theme, blue accent); tapping one opens a real confirmation dialog
-  (`lv_msgbox`, "Boot into: <title>?" / Boot / Cancel) rather than the
-  old double-tap-same-row scheme - same TWRP-style intent (don't kexec
-  on a stray touch), more visibly a deliberate confirmation now.
+  (`lv_msgbox`) with a 2x2 button grid - Edit / Set Default on top,
+  Boot (accented) / Cancel below, matching a mockup Bob signed off on -
+  rather than the old double-tap-same-row scheme. **Edit**: opens an
+  `lv_textarea` + `lv_keyboard` pre-filled with the entry's cmdline;
+  Save mutates that entry's in-memory copy only (never persisted, same
+  one-time-tweak semantics as GRUB's own 'e' edit-before-boot) and
+  returns to a fresh confirm dialog showing the edited line. **Set
+  Default**: boots this entry now (same as Boot) and also asks
+  `initramfs/init` to persist it as the future default via
+  `SET_DEFAULT=1` in the picker's stdout output - see
+  `initramfs/README.md` for how that's actually written to disk. Both
+  found and fixed a real layout bug in testing: the msgbox footer's
+  inherited flex gap made two 50%-width buttons individually overflow
+  their row, so all four stacked one-per-line instead of forming a 2x2
+  grid, until the gap was explicitly zeroed.
 - `PICKER_TIMEOUT_SECS` (default 10, `0` disables) auto-boots the first
   entry if nothing's tapped, cancelled by the first touch - mirrors
   GRUB's own timeout-to-default behavior, the actual safety net for a
@@ -73,12 +85,15 @@ resolution and never told rotation is happening at all.
   physical DRM buffer via `logical_to_physical`) verified correct via a
   standalone harness reproducing the same loop against fake buffers -
   content lands at the expected physical location for a rotated case.
-- The full tap -> confirm-dialog -> boot flow (`row_click_cb` opening
-  the `lv_msgbox`, tapping "Boot" firing `confirm_cb`) verified
-  end-to-end via a standalone harness that builds the real UI, drives
-  LVGL's indev with synthetic press/release coordinates at the real
-  computed positions of the row button and then the dialog's Boot
-  button, and confirms the right kernel index comes out the other end.
+- The full tap -> confirm-dialog -> Edit -> keyboard/textarea change ->
+  Save -> fresh confirm dialog -> Set Default flow verified end-to-end
+  via a standalone harness that builds the real UI and drives LVGL's
+  indev with synthetic press/release coordinates at the real computed
+  positions of each button in turn - confirms the 2x2 grid actually
+  renders as two rows of two (not four stacked rows - the bug above),
+  that editing the cmdline actually mutates the right entry, and that
+  the right kernel index plus the `SET_DEFAULT` flag both come out the
+  other end correctly.
 - DRM ioctl sequence (connector/encoder/crtc/dumb buffer/framebuffer/
   mmap) still runs correctly against a real (non-i915) DRM device here,
   same as the raw-DRM version - fails only at the final
@@ -103,7 +118,7 @@ during normal use.
 ## Input contract with `initramfs/`
 
 Reads a `title\tlinux\tinitrd\tcmdline` list from
-`initramfs/discover-kernels.sh`'s output (see `initramfs/init`), writes
-the selected entry back out as shell-sourceable
-`SELECTED_LINUX`/`SELECTED_INITRD`/`SELECTED_CMDLINE` assignments on
-stdout.
+`initramfs/discover-kernels.sh`'s output, by way of `apply-default.sh`
+(see `initramfs/init`), writes the selected entry back out as
+shell-sourceable `SELECTED_LINUX`/`SELECTED_INITRD`/`SELECTED_CMDLINE`
+assignments on stdout, plus `SET_DEFAULT=1` if "Set Default" was used.

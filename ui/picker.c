@@ -417,7 +417,10 @@ static void indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
 /* ---------------- UI ---------------- */
 
 static volatile int g_selected = -1;
+static volatile int g_set_default = 0;
 static struct entry *g_entries;
+
+static void open_confirm_dialog(int idx);
 
 /* Nothing else to do here: the main loop exits as soon as g_selected
  * is set (checked right after this fires, since click handling happens
@@ -428,23 +431,128 @@ static void confirm_cb(lv_event_t *e) {
     g_selected = (int)(intptr_t)lv_obj_get_user_data(mbox);
 }
 
+/* Set Default also boots into this entry now, same as Boot - the user
+ * is already looking at the confirm dialog for this specific entry, so
+ * "remember this AND go" is the natural reading, not "remember this
+ * but stay on the menu". initramfs/init persists the preference (see
+ * initramfs/README.md) before kexec once it sees SET_DEFAULT=1. */
+static void set_default_cb(lv_event_t *e) {
+    lv_obj_t *mbox = lv_event_get_user_data(e);
+    g_set_default = 1;
+    g_selected = (int)(intptr_t)lv_obj_get_user_data(mbox);
+}
+
 static void cancel_cb(lv_event_t *e) {
     lv_msgbox_close_async(lv_event_get_user_data(e));
 }
 
-static void row_click_cb(lv_event_t *e) {
-    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+/* Edit: GRUB-style one-time cmdline tweak, never persisted - just
+ * mutates this entry's in-memory copy for the rest of this run, same
+ * as GRUB's own 'e' edit-before-boot. */
+struct edit_ctx {
+    int idx;
+    lv_obj_t *mbox;
+    lv_obj_t *kb;
+    lv_obj_t *ta;
+};
 
+static void edit_close(struct edit_ctx *ctx) {
+    lv_obj_delete_async(ctx->kb);
+    lv_msgbox_close_async(ctx->mbox);
+    free(ctx);
+}
+
+static void edit_save_cb(lv_event_t *e) {
+    struct edit_ctx *ctx = lv_event_get_user_data(e);
+    snprintf(g_entries[ctx->idx].cmdline, sizeof(g_entries[ctx->idx].cmdline), "%s", lv_textarea_get_text(ctx->ta));
+    int idx = ctx->idx;
+    edit_close(ctx);
+    open_confirm_dialog(idx);
+}
+
+static void edit_cancel_cb(lv_event_t *e) {
+    struct edit_ctx *ctx = lv_event_get_user_data(e);
+    int idx = ctx->idx;
+    edit_close(ctx);
+    open_confirm_dialog(idx);
+}
+
+static void edit_cb(lv_event_t *e) {
+    lv_obj_t *confirm_mbox = lv_event_get_user_data(e);
+    int idx = (int)(intptr_t)lv_obj_get_user_data(confirm_mbox);
+    lv_msgbox_close_async(confirm_mbox);
+
+    struct edit_ctx *ctx = malloc(sizeof(*ctx));
+    ctx->idx = idx;
+
+    ctx->mbox = lv_msgbox_create(NULL);
+    lv_msgbox_add_title(ctx->mbox, "Edit boot command line");
+    lv_msgbox_add_text(ctx->mbox, "One-time change - not saved for next boot.");
+
+    ctx->ta = lv_textarea_create(lv_msgbox_get_content(ctx->mbox));
+    lv_textarea_set_one_line(ctx->ta, true);
+    lv_textarea_set_text(ctx->ta, g_entries[idx].cmdline);
+    lv_obj_set_width(ctx->ta, lv_pct(100));
+
+    ctx->kb = lv_keyboard_create(lv_screen_active());
+    lv_keyboard_set_textarea(ctx->kb, ctx->ta);
+
+    lv_obj_t *save_btn = lv_msgbox_add_footer_button(ctx->mbox, "Save");
+    lv_obj_t *cancel_btn = lv_msgbox_add_footer_button(ctx->mbox, "Cancel");
+    lv_obj_add_event_cb(save_btn, edit_save_cb, LV_EVENT_CLICKED, ctx);
+    lv_obj_add_event_cb(cancel_btn, edit_cancel_cb, LV_EVENT_CLICKED, ctx);
+}
+
+/* 2x2 footer grid (Edit/Set Default on top, Boot/Cancel below),
+ * matching the approved mockup - lv_msgbox's footer is a plain flex
+ * row by default, so it's wrapped into two rows of two by giving each
+ * button 50% width. */
+static void open_confirm_dialog(int idx) {
     lv_obj_t *mbox = lv_msgbox_create(NULL);
     lv_obj_set_user_data(mbox, (void *)(intptr_t)idx);
     lv_msgbox_add_title(mbox, "Confirm boot");
     char body[300];
     snprintf(body, sizeof(body), "Boot into:\n\n%s", g_entries[idx].title);
     lv_msgbox_add_text(mbox, body);
+
+    lv_obj_t *edit_btn = lv_msgbox_add_footer_button(mbox, "Edit");
+    lv_obj_t *default_btn = lv_msgbox_add_footer_button(mbox, "Set Default");
     lv_obj_t *confirm_btn = lv_msgbox_add_footer_button(mbox, "Boot");
     lv_obj_t *cancel_btn = lv_msgbox_add_footer_button(mbox, "Cancel");
+
+    lv_obj_t *footer = lv_msgbox_get_footer(mbox);
+    lv_obj_set_flex_flow(footer, LV_FLEX_FLOW_ROW_WRAP);
+    /* Zero the inherited flex gap - otherwise two 50%-width buttons'
+     * combined width plus that gap exceeds the row, so each wraps onto
+     * its own line instead of forming a 2x2 grid. Found by testing:
+     * looked like a plain 4-row stack with the gap left in. */
+    lv_obj_set_style_pad_column(footer, 0, 0);
+    lv_obj_set_style_pad_row(footer, 0, 0);
+    lv_obj_t *footer_btns[4] = {edit_btn, default_btn, confirm_btn, cancel_btn};
+    for (int i = 0; i < 4; i++) lv_obj_set_width(footer_btns[i], lv_pct(50));
+
+    lv_obj_set_style_text_color(edit_btn, lv_color_hex(0xc9d3db), 0);
+    lv_obj_set_style_text_color(default_btn, lv_color_hex(0xc9d3db), 0);
+    lv_obj_set_style_text_color(cancel_btn, lv_color_hex(0x93a0aa), 0);
+    lv_obj_set_style_text_color(confirm_btn, lv_color_hex(0xdce9fb), 0);
+    lv_obj_set_style_bg_color(confirm_btn, lv_color_hex(0x3d7ee8), 0);
+    lv_obj_set_style_bg_opa(confirm_btn, LV_OPA_30, 0);
+    lv_obj_set_style_border_side(confirm_btn, LV_BORDER_SIDE_TOP, 0);
+    lv_obj_set_style_border_side(cancel_btn, LV_BORDER_SIDE_TOP, 0);
+    lv_obj_set_style_border_width(confirm_btn, 1, 0);
+    lv_obj_set_style_border_width(cancel_btn, 1, 0);
+    lv_obj_set_style_border_color(confirm_btn, lv_color_hex(0x232c35), 0);
+    lv_obj_set_style_border_color(cancel_btn, lv_color_hex(0x232c35), 0);
+
+    lv_obj_add_event_cb(edit_btn, edit_cb, LV_EVENT_CLICKED, mbox);
+    lv_obj_add_event_cb(default_btn, set_default_cb, LV_EVENT_CLICKED, mbox);
     lv_obj_add_event_cb(confirm_btn, confirm_cb, LV_EVENT_CLICKED, mbox);
     lv_obj_add_event_cb(cancel_btn, cancel_cb, LV_EVENT_CLICKED, mbox);
+}
+
+static void row_click_cb(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    open_confirm_dialog(idx);
 }
 
 static void build_ui(struct entry *entries, int n, int timeout_secs, lv_obj_t **countdown_label_out) {
@@ -681,5 +789,6 @@ int main(int argc, char **argv) {
     shell_quote(stdout, "SELECTED_LINUX", entries[g_selected].linux_path);
     shell_quote(stdout, "SELECTED_INITRD", entries[g_selected].initrd_path);
     shell_quote(stdout, "SELECTED_CMDLINE", entries[g_selected].cmdline);
+    if (g_set_default) shell_quote(stdout, "SET_DEFAULT", "1");
     return 0;
 }
