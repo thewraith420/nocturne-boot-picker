@@ -82,6 +82,17 @@ for bin in $elf_files; do
     rel=${bin#"$root"}
 
     interp=$(readelf -l "$bin" 2>/dev/null | sed -n 's/.*program interpreter: \(.*\)\]/\1/p' | head -n1)
+    needed=$(readelf -d "$bin" 2>/dev/null | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p')
+
+    # Say something for every binary examined. A static binary has no
+    # interpreter and no NEEDED entries, so without this it produces no
+    # output at all - indistinguishable from never having been checked,
+    # which is exactly the kind of silence that hides real problems.
+    if [ -z "$interp" ] && [ -z "$needed" ]; then
+        ok "$rel statically linked - no runtime deps to satisfy"
+        continue
+    fi
+
     if [ -n "$interp" ]; then
         if [ -e "$root$interp" ]; then
             ok "$rel interpreter $interp present"
@@ -90,7 +101,7 @@ for bin in $elf_files; do
         fi
     fi
 
-    for lib in $(readelf -d "$bin" 2>/dev/null | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p'); do
+    for lib in $needed; do
         if find "$root" -name "$lib" | grep -q .; then
             ok "$rel needs $lib - present"
         else
