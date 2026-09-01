@@ -22,7 +22,12 @@ staging=$(mktemp -d)
 trap 'rm -rf "$staging"' EXIT
 
 # Applets init/discover-kernels.sh/apply-default.sh/kexec-boot.sh use.
-APPLETS="sh mount umount mkdir echo printf cut head awk cat ls"
+# The second group is used only by init's diagnostics (see the boot-log
+# block in init): without them a failed boot leaves nothing behind, which
+# is what made the first real attempt impossible to debug. They are
+# applet symlinks into the one busybox binary, so they cost no space.
+APPLETS="sh mount umount mkdir echo printf cut head awk cat ls
+         sleep dmesg uname tail sync date wc"
 
 say() { echo "==> $*"; }
 die() { echo "build-initramfs: $*" >&2; exit 1; }

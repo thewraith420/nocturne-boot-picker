@@ -31,6 +31,16 @@ on selection.
   unresponsive, and because every hardware test so far ran `./picker` by
   hand from a VT with `PICKER_ROTATE` already exported in the shell -
   never through `init`, the one path that didn't set it.
+- `test-init.sh` - runs the **real** `init` (absolute paths rewritten
+  into a sandbox, so it can't drift from a copy) against mocked
+  dependencies, covering the happy path, picker crashing, picker
+  selecting nothing, a failed root mount and failed discovery - 20
+  assertions over what gets kexec'd, what reaches the screen, and what
+  lands in the boot log. It has already earned its keep twice: it caught
+  a redirection-order bug (`2>/dev/null >&2` aims stdout at the
+  /dev/null fd2 just became, silently discarding the on-screen error
+  replay) and a duplicated outcome string from pairing `${v:+...}` with
+  `${v:-...}`.
 - `discover-kernels.sh` - parses a GRUB config for `menuentry` stanzas at
   any nesting depth (real kernels turned out to live inside an "Advanced
   options" submenu, not flat - see `docs/nocturne-grub.cfg`) into a
@@ -98,6 +108,39 @@ on selection.
   not just pass: deliberately removing `libdrm`, removing a script
   `init` calls, and clearing `init`'s executable bit each produce a
   specific failure.
+
+## The boot log: why a silent fallback is worse than it sounds
+
+`init`'s fallbacks exist so a picker failure never strands anyone - it
+kexecs the first discovered kernel and you land in your normal OS. The
+first real boot attempt did exactly that, and the result was a machine
+that booted straight to the desktop with no menu, no message and no
+trace. From the outside that is *identical* to "GRUB ignored the
+selection", and there was no way to tell which had happened: no journal
+in that window, no scrollback, and the console output scrolled past
+behind the kexec.
+
+So a failure now leaves evidence in two places:
+
+- **On screen**, on the fallback path only: a banner naming the failure,
+  the last 15 lines of picker's own stderr, and a
+  `PICKER_FALLBACK_PAUSE` (default 8s) hold so it can be read or
+  photographed before the kexec wipes the display. This is the only
+  channel that works on a machine with no network yet.
+- **`/boot/picker-last-boot.log`** on the real root, written on every
+  boot: outcome, stage trail, picker's exit code and full stderr,
+  `ls` of `/dev/dri` and `/dev/input` (if picker never drew anything,
+  a missing DRM node explains it instantly and is unguessable from a
+  blank screen), the menu it was working from, and the last 150 lines
+  of the picker kernel's `dmesg`. Written via the same brief
+  `remount,rw` dance `apply-default.sh` uses, `sync`'d before the kexec
+  because the incoming kernel does not replay this page cache, and
+  best-effort throughout - diagnostics must never be why a machine
+  fails to come up.
+
+`dmesg`, `sleep`, `uname`, `tail`, `sync`, `date` and `wc` are in
+`build-initramfs.sh`'s applet list *for this* - they're symlinks into
+the one busybox binary, so they cost nothing.
 
 ## This init loads no kernel modules - drivers must be built in
 

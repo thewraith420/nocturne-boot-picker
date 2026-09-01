@@ -23,7 +23,80 @@ mkdir -p /run/picker /mnt/root
 # shell instead of letting init exit and panic. Found and verified via
 # a standalone control-flow test (not hardware-dependent - pure shell
 # logic) after real-hardware code review turned up the gap.
+# Everything this script does happens in a window with no journal, no
+# scrollback and - on the fallback paths - no user-visible output at
+# all. That silence is deliberate: falling back straight into a working
+# kernel beats stranding someone at a prompt. But from the outside it is
+# indistinguishable from "the GRUB selection never took", which is
+# exactly what the first real boot attempt looked like: straight to the
+# desktop, no menu, nothing left behind to say why. Losing an entire
+# boot attempt to no evidence is worse than the few hundred ms this
+# costs, so: record what happened somewhere that survives the kexec.
+#
+# Strictly best-effort. Every step can fail and the boot continues -
+# diagnostics must never be the reason a machine doesn't come up.
+BOOT_LOG=/mnt/root/boot/picker-last-boot.log
+stages=""
+stage() {
+    stages="${stages}  - $1
+"
+    echo "picker: $1" >&2
+}
+
+# $1 = outcome summary. Writes the log to the real root, which is
+# mounted read-only, so this borrows the same brief remount dance
+# apply-default uses (see below) - and puts it back read-only after.
+save_log() {
+    [ -d /mnt/root/boot ] || {
+        echo "picker: (real root not mounted - cannot save a boot log)" >&2
+        return 0
+    }
+    mount -o remount,rw /mnt/root 2>/dev/null || {
+        echo "picker: (could not remount rw - cannot save a boot log)" >&2
+        return 0
+    }
+    {
+        echo "=== nocturne picker boot log ==="
+        echo "outcome:  $1"
+        echo "when:     $(date 2>/dev/null || echo '(no clock)')"
+        echo "kernel:   $(uname -r 2>/dev/null)"
+        echo
+        echo "--- stages reached ---"
+        printf '%s' "$stages"
+        echo
+        echo "--- selection ---"
+        echo "linux=${SELECTED_LINUX:-}"
+        echo "initrd=${SELECTED_INITRD:-}"
+        echo "cmdline=${SELECTED_CMDLINE:-}"
+        echo
+        # If picker never drew anything, the reason is usually that one
+        # of these is simply absent - which is instant to see here and
+        # near-impossible to guess at from a blank screen.
+        echo "--- /dev/dri (DRM - picker cannot draw without this) ---"
+        ls -l /dev/dri 2>&1 || true
+        echo
+        echo "--- /dev/input (touch) ---"
+        ls -l /dev/input 2>&1 || true
+        echo
+        echo "--- picker exit code: ${picker_rc:-n/a} ---"
+        echo "--- picker stderr ---"
+        cat /run/picker/picker.stderr 2>/dev/null || echo "(none captured)"
+        echo
+        echo "--- menu.tsv (first 5 of $(cat /run/picker/menu.tsv 2>/dev/null | wc -l 2>/dev/null) entries) ---"
+        head -n5 /run/picker/menu.tsv 2>/dev/null || echo "(no menu)"
+        echo
+        echo "--- dmesg (last 150 lines) ---"
+        dmesg 2>/dev/null | tail -n150 || echo "(dmesg unavailable)"
+    } > "$BOOT_LOG" 2>/dev/null || \
+        echo "picker: (failed to write $BOOT_LOG)" >&2
+    # Flush before kexec: the new kernel does not replay this page cache.
+    sync 2>/dev/null || true
+    mount -o remount,ro /mnt/root 2>/dev/null || true
+    return 0
+}
+
 rescue() {
+    save_log "rescue: $1"
     echo "picker: $1" >&2
     echo "picker: dropping to a rescue shell" >&2
     exec /bin/sh
@@ -41,10 +114,12 @@ rescue() {
 # GRUB's own EFI binary - grub.cfg lives on this ext4 partition, so the
 # ESP is never mounted here.
 : "${REAL_ROOT_DEV:=/dev/mmcblk0p2}"
+stage "mounting real root ($REAL_ROOT_DEV)"
 if ! mount -o ro "$REAL_ROOT_DEV" /mnt/root; then
     rescue "failed to mount real root ($REAL_ROOT_DEV)"
 fi
 
+stage "discovering kernels from grub.cfg"
 if ! /bin/discover-kernels.sh /mnt/root/boot/grub/grub.cfg > /run/picker/menu.tsv.raw || [ ! -s /run/picker/menu.tsv.raw ]; then
     rescue "no kernel entries found (discover-kernels.sh failed, or grub.cfg missing/empty)"
 fi
@@ -72,22 +147,53 @@ default_cmdline=$(printf '%s' "$default_line" | cut -f4)
 : "${PICKER_ROTATE:=270}"
 export PICKER_ROTATE
 
-if /bin/picker /run/picker/menu.tsv > /run/picker/selected; then
+# stderr goes to a file rather than the console: it carries picker's own
+# diagnostics (chosen touch device, DRM open failures) plus LVGL's log,
+# which is the single most useful thing to have when picker fails, and
+# on the console it scrolls past behind the kexec faster than anyone can
+# read it. It gets replayed to the screen on the failure path below, and
+# copied into the boot log either way.
+stage "running picker"
+if /bin/picker /run/picker/menu.tsv > /run/picker/selected 2>/run/picker/picker.stderr; then
+    picker_rc=0
     # Sets SELECTED_LINUX, SELECTED_INITRD, SELECTED_CMDLINE, and
     # SET_DEFAULT=1 if "Set Default" was used.
     . /run/picker/selected
 else
-    echo "picker: picker exited with an error - falling back to the default entry" >&2
+    picker_rc=$?
+    picker_failed="picker exited $picker_rc"
     SELECTED_LINUX="$default_linux"
     SELECTED_INITRD="$default_initrd"
     SELECTED_CMDLINE="$default_cmdline"
 fi
 
 if [ -z "$SELECTED_LINUX" ]; then
-    echo "picker: picker produced no selection - falling back to the default entry" >&2
+    picker_failed="${picker_failed:-picker produced no selection}"
     SELECTED_LINUX="$default_linux"
     SELECTED_INITRD="$default_initrd"
     SELECTED_CMDLINE="$default_cmdline"
+fi
+
+# The fallback is silent by design, and that is precisely what made the
+# first boot attempt undebuggable - it looks identical to GRUB ignoring
+# the selection. Say so on screen, show why, and hold long enough to
+# read or photograph it before the kexec wipes the display.
+if [ -n "${picker_failed:-}" ]; then
+    stage "FALLBACK: $picker_failed"
+    echo "" >&2
+    echo "picker: ================================================" >&2
+    echo "picker: the menu could not be shown ($picker_failed)." >&2
+    echo "picker: booting the default entry instead:" >&2
+    echo "picker:   $SELECTED_LINUX" >&2
+    echo "picker: last lines of picker's own output:" >&2
+    # Redirection order matters: point stdout at the real stderr FIRST,
+    # then silence tail's own errors. The other order aims fd1 at the
+    # /dev/null that fd2 has just become, and this replay - the only
+    # copy anyone without SSH will ever see - vanishes.
+    tail -n15 /run/picker/picker.stderr >&2 2>/dev/null || echo "picker:   (none)" >&2
+    echo "picker: full details saved to /boot/picker-last-boot.log" >&2
+    echo "picker: ================================================" >&2
+    sleep "${PICKER_FALLBACK_PAUSE:-8}"
 fi
 
 if [ -z "$SELECTED_LINUX" ]; then
@@ -113,4 +219,11 @@ if [ "${SET_DEFAULT:-}" = "1" ]; then
     fi
 fi
 
+if [ -n "${picker_failed:-}" ]; then
+    save_log "fell back: $picker_failed"
+else
+    save_log "booted user selection"
+fi
+
+stage "kexec into $SELECTED_LINUX"
 exec /sbin/kexec-boot.sh /mnt/root "$SELECTED_LINUX" "$SELECTED_INITRD" "$SELECTED_CMDLINE"
