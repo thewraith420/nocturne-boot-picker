@@ -809,9 +809,23 @@ int main(int argc, char **argv) {
             struct input_event ev;
             static int last_raw_x = -1, last_raw_y = -1;
             while (read(touch.fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
+                int new_down = -1; /* -1 = this event doesn't carry a down/up state */
                 if (ev.type == EV_ABS) {
-                    if (ev.code == touch.code_x) last_raw_x = ev.value;
-                    else if (ev.code == touch.code_y) last_raw_y = ev.value;
+                    if (ev.code == touch.code_x) {
+                        last_raw_x = ev.value;
+                    } else if (ev.code == touch.code_y) {
+                        last_raw_y = ev.value;
+                    } else if (ev.code == ABS_MT_TRACKING_ID) {
+                        /* Type B multitouch (hid_multitouch, which is
+                         * what this hardware's touch stack actually
+                         * uses) signals finger down/up via tracking ID
+                         * rather than BTN_TOUCH - confirmed on real
+                         * hardware that this device sends no BTN_TOUCH
+                         * at all, which is why touch still didn't
+                         * register even after selecting the right
+                         * INPUT_PROP_DIRECT device. -1 means lifted. */
+                        new_down = (ev.value != -1);
+                    }
                     if (last_raw_x >= 0 && last_raw_y >= 0) {
                         int lx, ly;
                         touch_to_logical(&touch, rot, ctx.cw, ctx.ch, drm.width, drm.height,
@@ -820,8 +834,12 @@ int main(int argc, char **argv) {
                         ctx.touch_y = ly;
                     }
                 } else if (ev.type == EV_KEY && ev.code == BTN_TOUCH) {
-                    ctx.touch_down = ev.value;
-                    if (ev.value && timer_fd >= 0 && !countdown_cancelled) {
+                    new_down = ev.value;
+                }
+
+                if (new_down >= 0 && new_down != ctx.touch_down) {
+                    ctx.touch_down = new_down;
+                    if (new_down && timer_fd >= 0 && !countdown_cancelled) {
                         /* first touch: cancel the auto-boot countdown */
                         countdown_cancelled = 1;
                         struct itimerspec off = {0};

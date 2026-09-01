@@ -148,12 +148,34 @@ resolution and never told rotation is happening at all.
   itself still needs on-device confirmation, but the selection logic
   that was actually wrong has real-device-backed verification now.
 
-## Real-hardware results so far (`f866572`)
+- **Touch down/up detection**: after the `INPUT_PROP_DIRECT` fix above
+  landed, real-hardware retest showed `touch_open()` now correctly
+  selects `/dev/input/event5` ("WCOM50C1:00 2D1F:486C UNKNOWN",
+  `INPUT_PROP_DIRECT=yes`) - but touch still didn't register at all.
+  Root cause: this device is driven by `hid_multitouch` (Type B
+  multitouch protocol, matching this project's own confirmed hardware
+  facts - Wacom often supplies the silicon, but the generic
+  `hid_multitouch` kernel driver binds it), which signals finger
+  down/up via `ABS_MT_TRACKING_ID` (a real ID means down, `-1` means
+  lifted) - it sends no `BTN_TOUCH` at all, which was the only signal
+  the touch loop was watching. Fixed by also treating
+  `ABS_MT_TRACKING_ID` transitions as a down/up source, alongside
+  `BTN_TOUCH` for devices that do send it. Verified with real
+  `struct input_event` records pushed through a real pipe (not mocked
+  function calls) into the actual event-handling loop copied
+  verbatim: a Type-B-style sequence (tracking ID assigned/positions/
+  `-1` to lift, no `BTN_TOUCH`) correctly drives `touch_down` through
+  1 then back to 0, and a plain `BTN_TOUCH`-only sequence still works
+  identically to before (no regression for devices that do send it).
+
+## Real-hardware results so far (`f866572` + touch fixes)
 
 Confirmed on the Slate: DRM master + i915 modeset work through LVGL's
 render path; `PICKER_ROTATE=270` is the correct upright orientation;
 the `VT_SETMODE` fix works (no repeat of the Ctrl+Alt+F1 hang). Touch
-was found completely dead at that commit - see the `touch_open()` fix
+was found completely dead, root-caused in two steps (wrong device
+selected, then wrong down/up signal watched even once the right
+device was selected) - see the two `touch_open()`/event-loop fixes
 above, not yet retested on hardware.
 
 ## Still needed, on real hardware
