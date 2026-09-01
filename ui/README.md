@@ -177,25 +177,79 @@ but none alone was sufficient either:
    just `INPUT_PROP_DIRECT`, since that distinction is what round 1's
    diagnostic was missing.
 
-## Real-hardware results so far (`f866572` + touch fixes)
+## The 64kB allocator, and why everything was tiny (or frozen)
+
+With touch working, the next problem was that the whole UI rendered
+absurdly small: measured on real hardware, the confirm dialog was
+260px wide with **13px (1.1mm) tall buttons** and **16px (1.4mm)
+text** on a 293 PPI panel. Three separate causes, all now fixed:
+
+1. **`lv_msgbox`'s width default is a hardcoded `LV_DPI_DEF * 2`
+   (260px)** - a compile-time constant with no relationship to the
+   real display size. Both dialogs now set their own width explicitly
+   (`lv_pct(55)` / `lv_pct(70)`).
+2. **`LV_FONT_DEFAULT` was Montserrat 14**, a fixed pixel size that
+   doesn't scale with DPI at all, and every larger font was disabled
+   in `lv_conf.h`. Now Montserrat 28/36/48 are enabled with 36 as the
+   default (40px line height = 3.5mm), and the dialog buttons and list
+   rows get explicit heights (`DIALOG_BTN_H` / `ROW_H`, ~1cm each at
+   this panel's DPI) rather than being sized by the font alone.
+3. **`lv_display_set_dpi()` was never called**, so the theme scaled all
+   its padding/spacing for a 130 DPI screen. Now set to the panel's
+   real 293 PPI, before `lv_theme_default_init()` (which samples it
+   once at call time).
+
+**The trap that made this take so long:** the obvious fix (just make
+the dialog wider) made the picker *freeze solid* - and, in some
+variants, segfault instead. It looked exactly like an LVGL layout bug,
+and a long round of bisecting individual style calls produced
+maddeningly inconsistent results: near-identical test variants would
+hang, crash, or pass. That inconsistency was the real clue. The actual
+cause was `LV_USE_STDLIB_MALLOC = LV_STDLIB_BUILTIN` with
+`LV_MEM_SIZE = 64kB` - LVGL's fixed pool for bare-metal MCUs, in a
+Linux userspace program that has a perfectly good libc. Rendering a
+translucent dialog requires a compositing **layer buffer sized to the
+dialog**; a 1100px-wide one asks for ~44kB in one allocation, and the
+25-row kernel list already holds ~27kB of that 64kB pool. The
+allocation fails, and LVGL's recovery path for a failed layer buffer
+is to log `Allocating layer buffer failed. Try later` and retry -
+forever. Hence: small dialog fine, big dialog frozen; and "inconsistent"
+results were just different variants landing either side of the
+64kB line. Switching to `LV_STDLIB_CLIB` fixed all of it at once,
+including the "high DPI is pathologically slow" symptom, which was the
+same exhaustion (bigger padding -> bigger layer buffers).
+
+Enabling `LV_USE_LOG` at WARN turned that multi-hour mystery into a
+two-line diagnosis, so it stays on - routed to **stderr** via
+`lv_log_register_print_cb()`, never stdout, which carries the
+`SELECTED_*` contract that `initramfs/init` sources.
+
+Measured after the fix, at the real 2000x3000 logical resolution with
+the full 25-entry menu: dialog 1100x298 (55% of width), footer buttons
+531x115 (10.0mm - a real touch target), font line height 40px (3.5mm),
+2x2 grid intact, first render 4-8ms, every subsequent render pass
+0.0-0.3ms, and zero LVGL warnings. The edit dialog plus on-screen
+keyboard - by far the heaviest allocation path, and the one that would
+have hung worst - was verified the same way, including a simulated key
+tap.
+
+## Real-hardware results so far
 
 Confirmed on the Slate: DRM master + i915 modeset work through LVGL's
 render path; `PICKER_ROTATE=270` is the correct upright orientation;
-the `VT_SETMODE` fix works (no repeat of the Ctrl+Alt+F1 hang). Touch
-took three rounds to root-cause (above) - the `event2`/multitouch-
-scoring fix has real-data-backed confirmation but not yet an actual
-on-device retest.
+the `VT_SETMODE` fix works (no repeat of the Ctrl+Alt+F1 hang); and
+**touch works** - tapping a row opens the confirm dialog naming that
+same entry (verified by Bob on-device after the `event2`/multitouch
+selection fix).
 
 ## Still needed, on real hardware
 
-Retest touch now that `touch_open()` prefers `INPUT_PROP_DIRECT` -
-tapping the first row should open a confirm dialog naming that same
-first entry, not a different one (would indicate a touch-axis-swap bug
-independent of device selection); does the widget/dialog UI actually look
-TWRP-like and legible at the panel's real DPI (font/button sizing was
-chosen by eye against LVGL's default theme, not measured against the
-real screen); does the 10s auto-boot timeout avoid false-triggering
-during normal use.
+Confirm the resized/re-fonted UI actually reads well on the panel
+(sizes above are computed from the real DPI and verified in a harness,
+but nobody has looked at the new build on the actual screen yet);
+confirm the on-screen keyboard is usable by finger at this size;
+confirm the 10s auto-boot timeout doesn't false-trigger during normal
+use.
 
 ## Input contract with `initramfs/`
 

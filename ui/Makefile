@@ -11,7 +11,12 @@ picker: check-lvgl picker.o $(LVGL_OBJ)
 check-lvgl:
 	@test -d lvgl || (echo "lvgl/ not found - run ./fetch-lvgl.sh first" && exit 1)
 
-%.o: %.c
+# Every object depends on lv_conf.h: changing it (enabling a font,
+# switching the allocator) changes what the LVGL sources compile to,
+# and without this make silently links stale objects - which shows up
+# as confusing undefined-reference errors, or worse, a binary built
+# half against the old config.
+%.o: %.c lv_conf.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
 clean:

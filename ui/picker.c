@@ -58,6 +58,12 @@
 
 #define MAX_ENTRIES 128
 #define DEFAULT_TIMEOUT_SECS 10
+/* Pixel Slate panel: 3000x2000 @ 12.3" -> sqrt(3000^2+2000^2)/12.3
+ * =~ 293 px/inch. The theme scales its padding/spacing from this, and
+ * it's what makes the size constants below mean real-world distances. */
+#define PANEL_DPI 293
+#define DIALOG_BTN_H 115   /* ~1cm at 293 PPI - comfortable touch target */
+#define ROW_H 130          /* kernel list row: ~1.1cm, fits the 36px font */
 #define VT_RELEASE_SIG SIGUSR1
 #define VT_ACQUIRE_SIG SIGUSR2
 #define POLL_PERIOD_MS 30
@@ -552,6 +558,10 @@ static void edit_cb(lv_event_t *e) {
     ctx->idx = idx;
 
     ctx->mbox = lv_msgbox_create(NULL);
+    /* lv_msgbox's class default width is a hardcoded LV_DPI_DEF*2
+     * (260px), unrelated to the real display size - unreadably small
+     * on this panel, so both dialogs size themselves explicitly. */
+    lv_obj_set_width(ctx->mbox, lv_pct(70));
     lv_msgbox_add_title(ctx->mbox, "Edit boot command line");
     lv_msgbox_add_text(ctx->mbox, "One-time change - not saved for next boot.");
 
@@ -575,6 +585,8 @@ static void edit_cb(lv_event_t *e) {
  * button 50% width. */
 static void open_confirm_dialog(int idx) {
     lv_obj_t *mbox = lv_msgbox_create(NULL);
+    /* Same hardcoded-260px default as the edit dialog. */
+    lv_obj_set_width(mbox, lv_pct(55));
     lv_obj_set_user_data(mbox, (void *)(intptr_t)idx);
     lv_msgbox_add_title(mbox, "Confirm boot");
     char body[300];
@@ -595,7 +607,14 @@ static void open_confirm_dialog(int idx) {
     lv_obj_set_style_pad_column(footer, 0, 0);
     lv_obj_set_style_pad_row(footer, 0, 0);
     lv_obj_t *footer_btns[4] = {edit_btn, default_btn, confirm_btn, cancel_btn};
-    for (int i = 0; i < 4; i++) lv_obj_set_width(footer_btns[i], lv_pct(50));
+    for (int i = 0; i < 4; i++) {
+        lv_obj_set_width(footer_btns[i], lv_pct(50));
+        /* Explicit touch target: the theme sizes these from the font
+         * alone, which left them ~13px (about 1mm) tall on this panel -
+         * measured, not guessed. DIALOG_BTN_H is ~1cm at the panel's
+         * real DPI, which is a comfortable finger target. */
+        lv_obj_set_height(footer_btns[i], DIALOG_BTN_H);
+    }
 
     lv_obj_set_style_text_color(edit_btn, lv_color_hex(0xc9d3db), 0);
     lv_obj_set_style_text_color(default_btn, lv_color_hex(0xc9d3db), 0);
@@ -651,7 +670,7 @@ static void build_ui(struct entry *entries, int n, int timeout_secs, lv_obj_t **
     for (int i = 0; i < n; i++) {
         lv_obj_t *btn = lv_button_create(list);
         lv_obj_set_width(btn, lv_pct(100));
-        lv_obj_set_height(btn, 84);
+        lv_obj_set_height(btn, ROW_H);
         lv_obj_set_style_bg_color(btn, lv_color_hex(0x1c2530), 0);
         lv_obj_set_style_bg_color(btn, lv_color_hex(0x2a3a4d), LV_STATE_PRESSED);
         lv_obj_set_style_radius(btn, 10, 0);
@@ -676,6 +695,11 @@ static void build_ui(struct entry *entries, int n, int timeout_secs, lv_obj_t **
 
         lv_obj_add_event_cb(btn, row_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
     }
+}
+
+static void lvgl_log_to_stderr(lv_log_level_t level, const char *buf) {
+    (void)level;
+    fprintf(stderr, "picker: lvgl: %s", buf);
 }
 
 static void shell_quote(FILE *out, const char *name, const char *value) {
@@ -729,7 +753,15 @@ int main(int argc, char **argv) {
     };
 
     lv_init();
+    /* Route LVGL's own warnings to stderr - never stdout, which
+     * carries the SELECTED_* contract that initramfs/init sources.
+     * Worth having on: an exhausted allocator inside LVGL surfaces
+     * here as a plain "No memory" line instead of an unexplained
+     * freeze (see the LV_STDLIB_CLIB note in lv_conf.h). */
+    lv_log_register_print_cb(lvgl_log_to_stderr);
     lv_display_t *disp = lv_display_create(ctx.cw, ctx.ch);
+    /* Must be set before lv_theme_default_init(), which samples it once. */
+    lv_display_set_dpi(disp, PANEL_DPI);
     lv_display_set_user_data(disp, &ctx);
     lv_display_set_flush_cb(disp, flush_cb);
     size_t buf_size = (size_t)ctx.cw * 64 * 4; /* partial buffer, 64 logical rows */
