@@ -62,6 +62,16 @@ default_linux=$(printf '%s' "$default_line" | cut -f2)
 default_initrd=$(printf '%s' "$default_line" | cut -f3)
 default_cmdline=$(printf '%s' "$default_line" | cut -f4)
 
+# The Slate's panel is mounted rotated: 270 is upright, confirmed on
+# real hardware. ui/picker.c defaults to 0 when this is unset, which is
+# correct as a library default but wrong for the only machine this
+# initramfs is ever built for - so set it here rather than leaving the
+# first boot to come up sideways. Same transform drives touch, so an
+# unset value is cosmetic (taps still land on the buttons you see)
+# rather than broken - which is exactly why it could go unnoticed.
+: "${PICKER_ROTATE:=270}"
+export PICKER_ROTATE
+
 if /bin/picker /run/picker/menu.tsv > /run/picker/selected; then
     # Sets SELECTED_LINUX, SELECTED_INITRD, SELECTED_CMDLINE, and
     # SET_DEFAULT=1 if "Set Default" was used.
