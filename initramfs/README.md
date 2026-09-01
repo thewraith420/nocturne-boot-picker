@@ -23,7 +23,14 @@ on selection.
   caught the failure first. Found by code review (not hardware-
   dependent - pure shell control flow) and verified against the real
   file with mocked dependencies covering both the happy path and every
-  failure branch.
+  failure branch. Also sets `PICKER_ROTATE=270` (overridable), since
+  `ui/picker.c` defaults to `0` and 270 is upright on the Slate's panel
+  - without it the menu renders sideways. That stayed hidden for a long
+  time because rotation drives the display *and* touch transforms
+  together, so an unset value is merely sideways rather than
+  unresponsive, and because every hardware test so far ran `./picker` by
+  hand from a VT with `PICKER_ROTATE` already exported in the shell -
+  never through `init`, the one path that didn't set it.
 - `discover-kernels.sh` - parses a GRUB config for `menuentry` stanzas at
   any nesting depth (real kernels turned out to live inside an "Advanced
   options" submenu, not flat - see `docs/nocturne-grub.cfg`) into a
