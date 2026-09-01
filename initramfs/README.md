@@ -109,6 +109,39 @@ on selection.
   `init` calls, and clearing `init`'s executable bit each produce a
   specific failure.
 
+## init races the drivers; a hand-run picker never does
+
+Every hardware test so far ran `ui/picker` by hand on a fully booted
+system, where the eMMC, i915 and the I2C-HID touch controller had
+finished probing minutes earlier. As PID 1 the situation is inverted:
+devtmpfs creates each node when its driver binds, and `init` reaches
+`picker` within milliseconds of the kernel handing over. `picker` does
+not degrade if hardware is missing - it returns non-zero when `/dev/dri`
+has no card (`ui/picker.c:748`) or no touch device is found
+(`ui/picker.c:754`) - and the fallback then boots the default silently.
+
+**A device that appears 200 ms late is indistinguishable from one that
+is missing entirely**, and both produce exactly the "nothing happened,
+straight to the desktop" that the first real boot attempt produced. So
+`init` waits for the root device, `/dev/dri/card*` and
+`/dev/input/event*` rather than sampling once
+(`PICKER_WAIT_ROOT` / `PICKER_WAIT_DRM` / `PICKER_WAIT_INPUT`, default
+15s each). Waits cost nothing when the device is already there, are
+never fatal - a timeout is logged and boot continues, so a wrong guess
+here cannot strand anyone - and the time each device took is recorded in
+the boot log, which turns "it failed" into "i915 took 3s".
+
+This is unproven as the cause of the first failed attempt; it is a
+known, cheap difference between the environment that has been tested and
+the one that has not.
+
+Note also that i915's DMC firmware lives on the **root** filesystem
+(`/lib/firmware/i915/`, 130 files on the Slate) and is *not* in the
+initramfs. Missing DMC normally degrades power management rather than
+killing the display, so this is a suspect rather than a diagnosis - but
+if the boot log ever shows `/dev/dri` populated and picker still failing
+to drive the panel, look here next.
+
 ## The boot log: why a silent fallback is worse than it sounds
 
 `init`'s fallbacks exist so a picker failure never strands anyone - it

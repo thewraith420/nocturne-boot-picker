@@ -43,6 +43,41 @@ stage() {
     echo "picker: $1" >&2
 }
 
+# Every hardware test so far ran ./picker by hand on a fully booted
+# system, where the eMMC, i915 and the I2C-HID touch controller had
+# finished probing minutes earlier. As PID 1 we are in a footrace with
+# them: devtmpfs creates each node when its driver binds, and init
+# reaches picker within milliseconds of the kernel handing over. picker
+# exits non-zero if /dev/dri has no card (picker.c:748) or if no touch
+# device is found (picker.c:754) - and init's fallback then boots the
+# default silently, which is precisely the "nothing happened" the first
+# real attempt produced. A device that shows up 200ms later looks
+# identical to one that is missing entirely, so wait for it rather than
+# sampling once.
+#
+# $1 = description, $2 = path or glob, $3 = seconds to wait.
+# Never fatal: on timeout we carry on and let the normal failure path
+# report it, since a wrong guess here should not strand anyone.
+have_any() {
+    for _f in $1; do [ -e "$_f" ] && return 0; done
+    return 1
+}
+wait_for() {
+    _n=0
+    have_any "$2" && return 0
+    stage "waiting for $1 ($2)"
+    while [ "$_n" -lt "$3" ]; do
+        sleep 1
+        _n=$((_n + 1))
+        if have_any "$2"; then
+            stage "$1 appeared after ${_n}s"
+            return 0
+        fi
+    done
+    stage "TIMEOUT: $1 ($2) never appeared after ${3}s"
+    return 1
+}
+
 # $1 = outcome summary. Writes the log to the real root, which is
 # mounted read-only, so this borrows the same brief remount dance
 # apply-default uses (see below) - and puts it back read-only after.
@@ -114,6 +149,9 @@ rescue() {
 # GRUB's own EFI binary - grub.cfg lives on this ext4 partition, so the
 # ESP is never mounted here.
 : "${REAL_ROOT_DEV:=/dev/mmcblk0p2}"
+# eMMC probe is not instant, and a root mount that fails here drops
+# straight to the rescue shell - the harshest outcome in the script.
+wait_for "root device" "$REAL_ROOT_DEV" "${PICKER_WAIT_ROOT:-15}"
 stage "mounting real root ($REAL_ROOT_DEV)"
 if ! mount -o ro "$REAL_ROOT_DEV" /mnt/root; then
     rescue "failed to mount real root ($REAL_ROOT_DEV)"
@@ -153,6 +191,11 @@ export PICKER_ROTATE
 # on the console it scrolls past behind the kexec faster than anyone can
 # read it. It gets replayed to the screen on the failure path below, and
 # copied into the boot log either way.
+# Both of these are hard requirements for picker: it returns non-zero
+# rather than degrading if either is absent.
+wait_for "DRM device (i915)" "/dev/dri/card*" "${PICKER_WAIT_DRM:-15}"
+wait_for "touch input device" "/dev/input/event*" "${PICKER_WAIT_INPUT:-15}"
+
 stage "running picker"
 if /bin/picker /run/picker/menu.tsv > /run/picker/selected 2>/run/picker/picker.stderr; then
     picker_rc=0

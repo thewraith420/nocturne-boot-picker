@@ -1,29 +1,50 @@
 #!/bin/bash
-# Exercises initramfs/init's new diagnostics against mocked dependencies.
-# Runs the REAL init file (paths rewritten into a sandbox), not a copy of
-# its logic, so it can't drift.
+# Exercises initramfs/init against mocked dependencies.
+#
+# Runs the REAL init file - absolute paths rewritten into a sandbox - so
+# it cannot drift from a copy of its own logic. Covers the fallback
+# chain, the diagnostics, and the device-wait race.
+#
+#   bash initramfs/test-init.sh
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 pass=0; fail=0
 ok()  { printf '  \033[32m[ok]\033[0m %s\n' "$*"; pass=$((pass+1)); }
 bad() { printf '  \033[31m[FAIL]\033[0m %s\n' "$*"; fail=$((fail+1)); }
 
-# $1=scenario name, $2=picker behaviour, $3=mount behaviour, $4=discover behaviour
+# $1=name  $2=picker behaviour  $3=root-mount rc  $4=discover rc
+# $5=devices: "present" (default) | "late" | "never"
 setup() {
   SB=$(mktemp -d); export SB
-  mkdir -p "$SB"/bin "$SB"/sbin "$SB"/run/picker "$SB"/mnt/root "$SB"/dev
+  devmode=${5:-present}
+  mkdir -p "$SB"/bin "$SB"/sbin "$SB"/run/picker "$SB"/mnt/root
   # mnt/root/boot exists only if the root mount succeeds - that IS what
   # mounting the real root does. Pre-creating it unconditionally made
   # save_log's "is the root actually mounted?" guard untestable.
   [ "$3" = 0 ] && mkdir -p "$SB"/mnt/root/boot
 
+  # Fake device tree. "late" has a helper create the nodes after a
+  # delay, modelling a driver that binds just after init gets there.
+  mkdir -p "$SB"/dev
+  : > "$SB/dev/rootdev"
+  case "$devmode" in
+    present) mkdir -p "$SB"/dev/dri "$SB"/dev/input
+             : > "$SB/dev/dri/card0"; : > "$SB/dev/input/event0" ;;
+    # Staggered on purpose: i915 and I2C-HID are separate drivers that
+    # bind at different moments, so both waits get exercised. Creating
+    # them simultaneously makes the second wait a no-op and silently
+    # stops testing it.
+    late)    ( sleep 2; mkdir -p "$SB"/dev/dri;   : > "$SB/dev/dri/card0"
+               sleep 2; mkdir -p "$SB"/dev/input; : > "$SB/dev/input/event0" ) & ;;
+    never)   ;;
+  esac
+
   # --- mocks -------------------------------------------------------
   cat > "$SB/bin/mount" <<EOF
 #!/bin/sh
-# remounts always succeed; the initial root mount obeys the scenario
 case "\$*" in
   *remount*) exit 0 ;;
-  *mmcblk0p2*) exit $3 ;;
+  *rootdev*) exit $3 ;;
 esac
 exit 0
 EOF
@@ -32,30 +53,16 @@ EOF
 echo "MARKER_RESCUE_SHELL_REACHED"
 exit 0
 EOF
-  cat > "$SB/bin/mdev" <<'EOF'
-#!/bin/sh
-exit 0
-EOF
-  cat > "$SB/bin/dmesg" <<'EOF'
-#!/bin/sh
-echo "[    0.000000] MARKER_DMESG_LINE"
-EOF
-  cat > "$SB/sbin/kexec-boot.sh" <<'EOF'
-#!/bin/sh
-echo "MARKER_KEXEC root=$1 linux=$2"
-exit 0
-EOF
+  printf '#!/bin/sh\nexit 0\n'                              > "$SB/bin/mdev"
+  printf '#!/bin/sh\necho "[0.000000] MARKER_DMESG_LINE"\n' > "$SB/bin/dmesg"
+  printf '#!/bin/sh\necho "MARKER_KEXEC root=$1 linux=$2"\nexit 0\n' > "$SB/sbin/kexec-boot.sh"
   cat > "$SB/bin/discover-kernels.sh" <<EOF
 #!/bin/sh
 [ "$4" = 0 ] || exit 1
 printf 'Ubuntu\t/boot/vmlinuz-real\t/boot/initrd.img-real\tro quiet\t\n'
 printf 'Ubuntu old\t/boot/vmlinuz-old\t/boot/initrd.img-old\tro quiet\t\n'
 EOF
-  cat > "$SB/bin/apply-default.sh" <<'EOF'
-#!/bin/sh
-cat "$1"
-EOF
-  # picker: $2 selects behaviour
+  printf '#!/bin/sh\ncat "$1"\n' > "$SB/bin/apply-default.sh"
   case "$2" in
     ok)    cat > "$SB/bin/picker" <<'EOF'
 #!/bin/sh
@@ -66,24 +73,15 @@ echo 'SELECTED_CMDLINE=ro quiet'
 exit 0
 EOF
     ;;
-    crash) cat > "$SB/bin/picker" <<'EOF'
-#!/bin/sh
-echo "picker mock: MARKER_DRM_OPEN_FAILED /dev/dri/card0" >&2
-exit 3
-EOF
-    ;;
-    empty) cat > "$SB/bin/picker" <<'EOF'
-#!/bin/sh
-echo "picker mock: exited clean but chose nothing" >&2
-exit 0
-EOF
-    ;;
+    crash) printf '#!/bin/sh\necho "picker mock: MARKER_DRM_OPEN_FAILED /dev/dri/card0" >&2\nexit 3\n' > "$SB/bin/picker" ;;
+    empty) printf '#!/bin/sh\necho "picker mock: chose nothing" >&2\nexit 0\n' > "$SB/bin/picker" ;;
   esac
   chmod +x "$SB"/bin/* "$SB"/sbin/*
 
   # --- the real init, redirected into the sandbox -------------------
   sed -e "s|/bin/|$SB/bin/|g" -e "s|/sbin/|$SB/sbin/|g" \
       -e "s|/mnt/root|$SB/mnt/root|g" -e "s|/run/picker|$SB/run/picker|g" \
+      -e "s|/dev/dri|$SB/dev/dri|g" -e "s|/dev/input|$SB/dev/input|g" \
       "$REPO/initramfs/init" > "$SB/init"
 }
 
@@ -91,46 +89,63 @@ EOF
 # rescue shell and is first in PATH, so a bare `sh` here silently runs
 # the mock instead of init - which looks exactly like "init dropped to
 # rescue immediately" and cost a debugging round.
-run() { PATH="$SB/bin:$SB/sbin:$PATH" PICKER_FALLBACK_PAUSE=0 \
-          /bin/sh "$SB/init" >"$SB/out" 2>"$SB/err"; echo $?; }
+run() {
+  PATH="$SB/bin:$SB/sbin:$PATH" \
+  REAL_ROOT_DEV="$SB/dev/rootdev" PICKER_FALLBACK_PAUSE=0 \
+  PICKER_WAIT_ROOT=${W:-3} PICKER_WAIT_DRM=${W:-3} PICKER_WAIT_INPUT=${W:-3} \
+    /bin/sh "$SB/init" >"$SB/out" 2>"$SB/err"
+}
 
-log() { cat "$SB/mnt/root/boot/picker-last-boot.log" 2>/dev/null; }
+log()  { cat "$SB/mnt/root/boot/picker-last-boot.log" 2>/dev/null; }
 both() { cat "$SB/out" "$SB/err" 2>/dev/null; }
 
 echo "=== 1. happy path: picker returns a selection ==="
-setup happy ok 0 0; run >/dev/null
+setup happy ok 0 0; run
 both | grep -q "MARKER_KEXEC.*vmlinuz-chosen" && ok "kexecs the user's choice" || bad "did not kexec the choice"
-log  | grep -qx "outcome:  booted user selection" && ok "log outcome line is exactly right" || bad "outcome line wrong: [$(log | grep outcome)]"
-log  | grep -q "MARKER_DMESG_LINE"                && ok "log captures dmesg" || bad "no dmesg in log"
-log  | grep -q "picker mock: drew the menu"       && ok "log captures picker stderr" || bad "no picker stderr in log"
-both | grep -q "MARKER_RESCUE"                    && bad "unexpectedly hit rescue" || ok "no rescue on happy path"
+log  | grep -qx "outcome:  booted user selection" && ok "log outcome line exact" || bad "outcome wrong: [$(log | grep outcome)]"
+log  | grep -q "MARKER_DMESG_LINE"    && ok "log captures dmesg" || bad "no dmesg in log"
+log  | grep -q "drew the menu"        && ok "log captures picker stderr" || bad "no picker stderr in log"
+both | grep -q "MARKER_RESCUE"        && bad "unexpectedly hit rescue" || ok "no rescue on happy path"
+log  | grep -q "waiting for"          && bad "waited despite devices being present" || ok "no wait when devices already there"
 
-echo "=== 2. picker crashes (the real first-boot suspect) ==="
-setup crash crash 0 0; run >/dev/null
-both | grep -q "MARKER_KEXEC.*vmlinuz-real" && ok "falls back to first discovered kernel" || bad "no fallback kexec"
+echo "=== 2. picker crashes (the first-boot suspect) ==="
+setup crash crash 0 0; run
+both | grep -q "MARKER_KEXEC.*vmlinuz-real"  && ok "falls back to first discovered kernel" || bad "no fallback kexec"
 both | grep -q "the menu could not be shown" && ok "says so ON SCREEN (was silent before)" || bad "still silent on screen"
-both | grep -q "MARKER_DRM_OPEN_FAILED"      && ok "replays picker stderr to screen" || bad "stderr not shown"
-log  | grep -q "picker exit code: 3"         && ok "log records exit code 3" || bad "exit code missing: $(log | grep -i 'exit code')"
-log  | grep -qx "outcome:  fell back: picker exited 3" && ok "log outcome line is exactly right (no duplication)" || bad "outcome line wrong: [$(log | grep outcome)]"
-log  | grep -q "MARKER_DRM_OPEN_FAILED"      && ok "log captures the DRM error" || bad "DRM error not logged"
-log  | grep -q -- "--- /dev/dri"             && ok "log includes device listing" || bad "no device listing"
+both | grep -q "MARKER_DRM_OPEN_FAILED"      && ok "replays picker stderr to screen" || bad "stderr not shown on screen"
+log  | grep -q "picker exit code: 3"         && ok "log records exit code 3" || bad "exit code missing"
+log  | grep -qx "outcome:  fell back: picker exited 3" && ok "log outcome exact (no duplication)" || bad "outcome wrong: [$(log | grep outcome)]"
 
 echo "=== 3. picker exits 0 but selects nothing ==="
-setup empty empty 0 0; run >/dev/null
-both | grep -q "MARKER_KEXEC.*vmlinuz-real"   && ok "falls back" || bad "no fallback"
-log  | grep -qx "outcome:  fell back: picker produced no selection" && ok "log distinguishes this from a crash" || bad "outcome line wrong: [$(log | grep outcome)]"
+setup empty empty 0 0; run
+both | grep -q "MARKER_KEXEC.*vmlinuz-real" && ok "falls back" || bad "no fallback"
+log  | grep -qx "outcome:  fell back: picker produced no selection" && ok "distinguished from a crash" || bad "outcome wrong: [$(log | grep outcome)]"
 
-echo "=== 4. root mount fails -> rescue, and says why it can't log ==="
-setup mountfail ok 1 0; run >/dev/null
-both | grep -q "MARKER_RESCUE_SHELL_REACHED"  && ok "drops to rescue shell" || bad "no rescue shell"
-both | grep -q "cannot save a boot log"       && ok "explains the missing log instead of silently skipping" || bad "silent about no log"
-both | grep -q "MARKER_KEXEC"                 && bad "kexec'd despite no root!" || ok "does not kexec"
+echo "=== 4. root mount fails -> rescue ==="
+setup mountfail ok 1 0; run
+both | grep -q "MARKER_RESCUE_SHELL_REACHED" && ok "drops to rescue shell" || bad "no rescue shell"
+both | grep -q "cannot save a boot log"      && ok "explains the missing log" || bad "silent about no log"
+both | grep -q "MARKER_KEXEC"                && bad "kexec'd despite no root!" || ok "does not kexec"
 
-echo "=== 5. discovery fails -> rescue, but root IS mounted so log survives ==="
-setup discfail ok 0 1; run >/dev/null
-both | grep -q "MARKER_RESCUE_SHELL_REACHED"  && ok "drops to rescue shell" || bad "no rescue shell"
-log  | grep -q "outcome:  rescue: no kernel entries found" && ok "log records the rescue reason" || bad "outcome: $(log | grep outcome)"
-log  | grep -q "mounting real root"           && ok "log shows stages reached" || bad "no stage trail"
+echo "=== 5. discovery fails -> rescue, root mounted so log survives ==="
+setup discfail ok 0 1; run
+both | grep -q "MARKER_RESCUE_SHELL_REACHED" && ok "drops to rescue shell" || bad "no rescue shell"
+log  | grep -q "outcome:  rescue: no kernel entries found" && ok "log records rescue reason" || bad "outcome wrong"
+log  | grep -q "mounting real root"          && ok "log shows stage trail" || bad "no stage trail"
+
+echo "=== 6. THE RACE: devices appear 2s late (was an instant silent failure) ==="
+W=10 setup late ok 0 0 late; W=10 run
+both | grep -q "waiting for DRM device"      && ok "waits instead of sampling once" || bad "did not wait"
+log  | grep -qE "DRM device .* appeared after [0-9]+s" && ok "records how long DRM took" || bad "no appearance timing: [$(log | grep -i drm | head -2)]"
+log  | grep -qE "touch input device appeared after [0-9]+s" && ok "waits for touch too" || bad "no touch wait recorded"
+both | grep -q "MARKER_KEXEC.*vmlinuz-chosen" && ok "still boots the user's choice" || bad "lost the selection"
+log  | grep -q "TIMEOUT"                     && bad "reported a timeout despite devices arriving" || ok "no spurious timeout"
+
+echo "=== 7. devices never appear: must NOT hang or rescue ==="
+W=2 setup never crash 0 0 never; W=2 run
+log  | grep -q "TIMEOUT: DRM device"         && ok "logs the timeout explicitly" || bad "timeout not logged"
+both | grep -q "MARKER_KEXEC.*vmlinuz-real"  && ok "still falls back to a bootable kernel" || bad "did not boot anything"
+both | grep -q "MARKER_RESCUE"               && bad "stranded the user in rescue" || ok "does not strand the user"
 
 echo
 echo "passed: $pass   failed: $fail"
