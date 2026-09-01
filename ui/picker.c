@@ -579,9 +579,18 @@ static void edit_cb(lv_event_t *e) {
      * slice of it - you cannot see what you are editing. Wrapped over a
      * few lines shows the whole thing. */
     lv_textarea_set_one_line(ctx->ta, false);
-    lv_textarea_set_text(ctx->ta, g_entries[idx].cmdline);
+    /* Size BEFORE text: the text wraps against whatever width the
+     * textarea has at set_text time, so setting it first wraps against
+     * the default width and re-wraps later. Harmless here (measured -
+     * the layout comes out identical either way) but there is no reason
+     * to depend on the re-wrap. */
     lv_obj_set_width(ctx->ta, lv_pct(100));
     lv_obj_set_height(ctx->ta, EDIT_TA_H);
+    lv_textarea_set_text(ctx->ta, g_entries[idx].cmdline);
+    /* set_text leaves the cursor at the end; show the START of the
+     * command line, which is the part worth reading first. */
+    lv_textarea_set_cursor_pos(ctx->ta, 0);
+    lv_obj_scroll_to_y(ctx->ta, 0, LV_ANIM_OFF);
 
     /* Parented to lv_layer_top(), NOT lv_screen_active().
      *
@@ -617,6 +626,21 @@ static void edit_cb(lv_event_t *e) {
     lv_obj_set_height(cancel_btn, DIALOG_BTN_H);
     lv_obj_add_event_cb(save_btn, edit_save_cb, LV_EVENT_CLICKED, ctx);
     lv_obj_add_event_cb(cancel_btn, edit_cancel_cb, LV_EVENT_CLICKED, ctx);
+
+    /* On hardware the textarea came up blank until the first keystroke,
+     * even though the text was set and - measured in the headless
+     * harness - laid out correctly and inside the visible content area.
+     * So it is not layout or scrolling: the content simply was not
+     * painted until some later event forced a redraw. Force it here,
+     * the same remedy the VT-reacquire path above needs, and for the
+     * same underlying reason: this display is driven manually, so
+     * nothing else will decide a repaint is due.
+     *
+     * NOT verified headlessly - a dummy flush callback cannot reproduce
+     * a real partial-render pass, which is exactly why this one had to
+     * be found on a panel. */
+    lv_obj_update_layout(ctx->mbox);
+    lv_obj_invalidate(lv_layer_top());
 }
 
 /* 2x2 footer grid (Edit/Set Default on top, Boot/Cancel below),
@@ -939,7 +963,13 @@ int main(int argc, char **argv) {
                     if (drmSetMaster(drm.fd) == 0) {
                         have_master = 1;
                         drmModeSetCrtc(drm.fd, drm.crtc_id, drm.fb_id, 0, 0, &drm.conn_id, 1, &drm.mode);
+                        /* Both layers: dialogs and the on-screen
+                         * keyboard live on lv_layer_top() (msgbox puts
+                         * its backdrop there), so invalidating only the
+                         * active screen would leave an open dialog
+                         * unpainted after a VT switch back. */
                         lv_obj_invalidate(lv_screen_active());
+                        lv_obj_invalidate(lv_layer_top());
                     }
                     if (vt_fd >= 0) ioctl(vt_fd, VT_RELDISP, VT_ACKACQ);
                 }

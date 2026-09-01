@@ -60,13 +60,15 @@ int main(void) {
     lv_msgbox_add_title(mbox, "Edit boot command line");
     lv_obj_t *ta = lv_textarea_create(lv_msgbox_get_content(mbox));
     lv_textarea_set_one_line(ta, false);
+    lv_obj_set_width(ta, lv_pct(100));
+    lv_obj_set_height(ta, 220);
     lv_textarea_set_text(ta,
         "root=UUID=076aa633-aff9-4f0f-98a7-f939eb74e7ff ro quiet splash "
         "module_blacklist=hid_google_hammer,cros_usbpd_notify "
         "i915.enable_dpcd_backlight=2 i915.enable_psr=0 "
         "crashkernel=2G-4G:320M,4G-32G:512M,32G-64G:1024M");
-    lv_obj_set_width(ta, lv_pct(100));
-    lv_obj_set_height(ta, 220);
+    lv_textarea_set_cursor_pos(ta, 0);
+    lv_obj_scroll_to_y(ta, 0, LV_ANIM_OFF);
 
     lv_obj_t *kb = lv_keyboard_create(lv_layer_top());
     lv_obj_set_size(kb, lv_pct(100), lv_pct(45));
@@ -111,6 +113,19 @@ int main(void) {
           "cmdline textarea is multi-line (a 250+ char cmdline is unreadable on one)");
     check(lv_obj_get_width(ta) > W / 2,
           "cmdline textarea is wide enough to be worth reading");
+
+    /* The blank-textarea bug was a repaint problem, not layout - but
+     * assert the layout half here so a future change cannot quietly
+     * push the text out of the visible content area instead. */
+    lv_obj_t *content = lv_msgbox_get_content(mbox);
+    lv_obj_t *lab = lv_textarea_get_label(ta);
+    lv_area_t ca, la2;
+    lv_obj_get_coords(content, &ca);
+    lv_obj_get_coords(lab, &la2);
+    check(la2.y2 >= ca.y1 && la2.y1 <= ca.y2,
+          "cmdline text is inside the dialog's visible content area");
+    check(lv_obj_get_scroll_y(ta) == 0,
+          "textarea is scrolled to the top, showing the start of the cmdline");
 
     printf("\npassed: %d  failed: %d\n", passes, fails);
     return fails ? 1 : 0;
