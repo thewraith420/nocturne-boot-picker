@@ -19,7 +19,16 @@ check-lvgl:
 %.o: %.c lv_conf.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-clean:
-	rm -f picker picker.o $(LVGL_OBJ)
+# Headless regression test for the Edit dialog's z-order - the keyboard
+# rendered fine and was dead to touch because it sat under the msgbox
+# backdrop. Structural, so it needs no panel.
+test-edit-layout: check-lvgl test-edit-layout.o $(LVGL_OBJ)
+	$(CC) $(CFLAGS) -o $@ test-edit-layout.o $(LVGL_OBJ) $(LDLIBS)
 
-.PHONY: clean check-lvgl
+test: test-edit-layout
+	./test-edit-layout
+
+clean:
+	rm -f picker picker.o test-edit-layout test-edit-layout.o $(LVGL_OBJ)
+
+.PHONY: clean check-lvgl test

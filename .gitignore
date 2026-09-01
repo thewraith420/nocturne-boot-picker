@@ -19,3 +19,4 @@ initramfs/root/
 # Local scratch
 *.log
 *.swp
+ui/test-edit-layout

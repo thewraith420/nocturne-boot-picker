@@ -64,6 +64,12 @@
 #define PANEL_DPI 293
 #define DIALOG_BTN_H 115   /* ~1cm at 293 PPI - comfortable touch target */
 #define ROW_H 130          /* kernel list row: ~1.1cm, fits the 36px font */
+/* Edit dialog. The keyboard takes the bottom of the screen and the
+ * dialog is capped to what remains, so these two are related: raising
+ * one shrinks the other. 45% of a 3000px-tall logical display leaves
+ * ~337px per key row, comfortably over the ~1cm touch target. */
+#define KEYBOARD_PCT_H 45
+#define EDIT_TA_H 220      /* ~4 wrapped lines of the 36px font */
 #define VT_RELEASE_SIG SIGUSR1
 #define VT_ACQUIRE_SIG SIGUSR2
 #define POLL_PERIOD_MS 30
@@ -561,17 +567,46 @@ static void edit_cb(lv_event_t *e) {
     /* lv_msgbox's class default width is a hardcoded LV_DPI_DEF*2
      * (260px), unrelated to the real display size - unreadably small
      * on this panel, so both dialogs size themselves explicitly. */
-    lv_obj_set_width(ctx->mbox, lv_pct(70));
+    /* Wider than the confirm dialog: this one has to show a 250+
+     * character command line, not a kernel title. */
+    lv_obj_set_width(ctx->mbox, lv_pct(92));
     lv_msgbox_add_title(ctx->mbox, "Edit boot command line");
     lv_msgbox_add_text(ctx->mbox, "One-time change - not saved for next boot.");
 
     ctx->ta = lv_textarea_create(lv_msgbox_get_content(ctx->mbox));
-    lv_textarea_set_one_line(ctx->ta, true);
+    /* NOT one_line: a real cmdline here is 250+ characters, and in
+     * one-line mode the textarea shows a narrow horizontally-scrolled
+     * slice of it - you cannot see what you are editing. Wrapped over a
+     * few lines shows the whole thing. */
+    lv_textarea_set_one_line(ctx->ta, false);
     lv_textarea_set_text(ctx->ta, g_entries[idx].cmdline);
     lv_obj_set_width(ctx->ta, lv_pct(100));
+    lv_obj_set_height(ctx->ta, EDIT_TA_H);
 
-    ctx->kb = lv_keyboard_create(lv_screen_active());
+    /* Parented to lv_layer_top(), NOT lv_screen_active().
+     *
+     * lv_msgbox_create(NULL) puts a backdrop object on lv_layer_top()
+     * sized 100%x100% (lv_msgbox.c) and the dialog inside it. A
+     * keyboard on the screen layer therefore sits UNDERNEATH that
+     * backdrop entirely: it renders greyed-out behind the dim and the
+     * backdrop swallows every tap meant for its keys. Found on real
+     * hardware - the keyboard drew perfectly and was completely dead.
+     *
+     * Created after the msgbox, so as a later sibling of the backdrop
+     * it draws above it and receives touches. Deliberately a SIBLING
+     * rather than a child of the backdrop: edit_close() deletes the
+     * keyboard explicitly, and as a child it would be deleted a second
+     * time when the msgbox tears its backdrop down. */
+    ctx->kb = lv_keyboard_create(lv_layer_top());
+    lv_obj_set_size(ctx->kb, lv_pct(100), lv_pct(KEYBOARD_PCT_H));
+    lv_obj_align(ctx->kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_keyboard_set_textarea(ctx->kb, ctx->ta);
+
+    /* The keyboard owns the bottom half of the screen, so a centred
+     * dialog fights it for space. Pin the dialog to the top and cap its
+     * height at what is left. */
+    lv_obj_set_style_max_height(ctx->mbox, lv_pct(100 - KEYBOARD_PCT_H - 4), 0);
+    lv_obj_align(ctx->mbox, LV_ALIGN_TOP_MID, 0, 16);
 
     lv_obj_t *save_btn = lv_msgbox_add_footer_button(ctx->mbox, "Save");
     lv_obj_t *cancel_btn = lv_msgbox_add_footer_button(ctx->mbox, "Cancel");
