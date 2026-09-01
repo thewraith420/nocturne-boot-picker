@@ -43,38 +43,20 @@ stage() {
     echo "picker: $1" >&2
 }
 
-# Every hardware test so far ran ./picker by hand on a fully booted
-# system, where the eMMC, i915 and the I2C-HID touch controller had
-# finished probing minutes earlier. As PID 1 we are in a footrace with
-# them: devtmpfs creates each node when its driver binds, and init
-# reaches picker within milliseconds of the kernel handing over. picker
-# exits non-zero if /dev/dri has no card (picker.c:748) or if no touch
-# device is found (picker.c:754) - and init's fallback then boots the
-# default silently, which is precisely the "nothing happened" the first
-# real attempt produced. A device that shows up 200ms later looks
-# identical to one that is missing entirely, so wait for it rather than
-# sampling once.
+# As PID 1 we are in a footrace with driver probe: a real boot log shows
+# init reaching picker within ~0.85s of the kernel starting, while
+# devices are still enumerating. Run by hand on a booted system
+# everything settled minutes ago, which is why none of this appeared in
+# testing.
 #
-# $1 = description, $2 = path or glob, $3 = seconds to wait.
+# What init waits for here is the ROOT DEVICE only - the one device it
+# owns the criteria for ("can I mount it"). picker does its own waiting
+# for DRM and touch, because only it knows what a usable one looks like.
+#
 # Never fatal: on timeout we carry on and let the normal failure path
 # report it, since a wrong guess here should not strand anyone.
 have_any() {
     for _f in $1; do [ -e "$_f" ] && return 0; done
-    return 1
-}
-
-# A card node is necessary but NOT sufficient. picker's
-# drm_open_first_connected() (ui/picker.c:264) opens /dev/dri/cardN and
-# then requires a connector that is actually connected; i915 can publish
-# the card node before the eDP connector has finished reporting, so
-# waiting on the node alone can still hand picker a card it rejects -
-# failing for the same reason, just slightly later.
-drm_connected() {
-    for _s in /sys/class/drm/card*-*/status; do
-        [ -r "$_s" ] || continue
-        read _v < "$_s" 2>/dev/null || continue
-        [ "$_v" = "connected" ] && return 0
-    done
     return 1
 }
 
@@ -214,12 +196,17 @@ export PICKER_ROTATE
 # on the console it scrolls past behind the kexec faster than anyone can
 # read it. It gets replayed to the screen on the failure path below, and
 # copied into the boot log either way.
-# Both of these are hard requirements for picker: it returns non-zero
-# rather than degrading if either is absent.
-wait_for "DRM device (i915)" "/dev/dri/card*" "${PICKER_WAIT_DRM:-15}"
-wait_until "connected DRM output" drm_connected "${PICKER_WAIT_DRM:-15}"
-wait_for "touch input device" "/dev/input/event*" "${PICKER_WAIT_INPUT:-15}"
-
+# NOTE: picker waits for its own DRM and touch devices (PICKER_WAIT_SECS,
+# see ui/picker.c). init deliberately does NOT gate on them here.
+#
+# It used to, and the check was worse than useless: "does any
+# /dev/input/event* exist" was satisfied instantly by the unrelated
+# event0-2 present from the very start, so init waited zero seconds and
+# picker still exited with "no touch input device found" while the real
+# controller was merely a second behind. A proxy for a check is a second
+# definition of the thing, and it disagreed with the real one. Only
+# touch_open() knows what a usable touch device is, so only picker can
+# usefully wait for one.
 stage "running picker"
 if /bin/picker /run/picker/menu.tsv > /run/picker/selected 2>/run/picker/picker.stderr; then
     picker_rc=0

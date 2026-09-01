@@ -26,8 +26,15 @@ setup() {
   # Fake device tree. "late" has a helper create the nodes after a
   # delay, modelling a driver that binds just after init gets there.
   mkdir -p "$SB"/dev "$SB"/sys/class/drm/card0-eDP-1
-  : > "$SB/dev/rootdev"
   conn() { echo "$1" > "$SB/sys/class/drm/card0-eDP-1/status"; }
+  # picker owns waiting for DRM and touch (PICKER_WAIT_SECS, ui/picker.c)
+  # since only touch_open() knows what a usable device is. The ONLY wait
+  # left in init is the root device, so that is what these exercise.
+  case "$devmode" in
+    rootlate)  ( sleep 2; : > "$SB/dev/rootdev" ) & ;;
+    rootnever) ;;
+    *)         : > "$SB/dev/rootdev" ;;
+  esac
   case "$devmode" in
     present) mkdir -p "$SB"/dev/dri "$SB"/dev/input
              : > "$SB/dev/dri/card0"; : > "$SB/dev/input/event0"; conn connected ;;
@@ -146,26 +153,19 @@ both | grep -q "MARKER_RESCUE_SHELL_REACHED" && ok "drops to rescue shell" || ba
 log  | grep -q "outcome:  rescue: no kernel entries found" && ok "log records rescue reason" || bad "outcome wrong"
 log  | grep -q "mounting real root"          && ok "log shows stage trail" || bad "no stage trail"
 
-echo "=== 6. THE RACE: devices appear 2s late (was an instant silent failure) ==="
-W=10 setup late ok 0 0 late; W=10 run
-both | grep -q "waiting for DRM device"      && ok "waits instead of sampling once" || bad "did not wait"
-log  | grep -qE "DRM device .* appeared after [0-9]+s" && ok "records how long DRM took" || bad "no appearance timing: [$(log | grep -i drm | head -2)]"
-log  | grep -qE "touch input device .* appeared after [0-9]+s" && ok "waits for touch too" || bad "no touch wait recorded"
-log  | grep -qE "connected DRM output appeared after [0-9]+s" && ok "waits for the connector to report connected" || bad "no connector wait: [$(log | grep -i connect | head -2)]"
-both | grep -q "MARKER_KEXEC.*vmlinuz-chosen" && ok "still boots the user's choice" || bad "lost the selection"
-log  | grep -q "TIMEOUT"                     && bad "reported a timeout despite devices arriving" || ok "no spurious timeout"
+echo "=== 6. THE RACE: root device appears 2s late ==="
+W=10 setup rootlate ok 0 0 rootlate; W=10 run
+both | grep -q "waiting for root device"  && ok "waits instead of sampling once" || bad "did not wait"
+log  | grep -qE "root device .* appeared after [0-9]+s" && ok "records how long it took" || bad "no timing: [$(log | grep -i root | head -2)]"
+both | grep -q "MARKER_KEXEC.*vmlinuz-chosen" && ok "goes on to boot normally" || bad "did not boot"
+log  | grep -q "TIMEOUT"                  && bad "spurious timeout" || ok "no spurious timeout"
 
-echo "=== 7. devices never appear: must NOT hang or rescue ==="
-W=2 setup never crash 0 0 never; W=2 run
-log  | grep -q "TIMEOUT: DRM device"         && ok "logs the timeout explicitly" || bad "timeout not logged"
-both | grep -q "MARKER_KEXEC.*vmlinuz-real"  && ok "still falls back to a bootable kernel" || bad "did not boot anything"
-both | grep -q "MARKER_RESCUE"               && bad "stranded the user in rescue" || ok "does not strand the user"
-
-echo "=== 8. card node present but connector NOT connected (the sufficiency gap) ==="
-W=2 setup notconn crash 0 0 notconn; W=2 run
-log  | grep -q "TIMEOUT: connected DRM output" && ok "waits on connector status, not just the card node" || bad "sailed past a disconnected panel: [$(log | grep -iE 'timeout|connect' | head -3)]"
-log  | grep -q "TIMEOUT: DRM device"           && bad "wrongly reported the card node missing" || ok "card-node wait passed (it IS present)"
-both | grep -q "MARKER_KEXEC.*vmlinuz-real"    && ok "still falls back to a bootable kernel" || bad "did not boot anything"
+echo "=== 7. root device never appears: must NOT hang ==="
+W=2 setup rootnever ok 1 0 rootnever; W=2 run
+log  | grep -q "TIMEOUT: root device"        && bad "log unreachable when root never mounts" || ok "no log (root never mounted - nothing to write to)"
+both | grep -q "TIMEOUT: root device"        && ok "reports the timeout on screen" || bad "timeout not reported"
+both | grep -q "MARKER_RESCUE_SHELL_REACHED" && ok "drops to rescue rather than hanging" || bad "did not reach rescue"
+both | grep -q "MARKER_KEXEC"                && bad "kexec'd with no root!" || ok "does not kexec"
 
 echo
 echo "passed: $pass   failed: $fail"

@@ -726,6 +726,39 @@ static void shell_quote(FILE *out, const char *name, const char *value) {
     fputs("'\n", out);
 }
 
+/* Retries a device open until it succeeds or PICKER_WAIT_SECS (default
+ * 20, 0 disables) elapses. Exactly one of drm/touch is non-NULL - the
+ * point is that the retry re-runs the REAL open, so "usable device"
+ * keeps exactly one definition no matter how the criteria evolve.
+ *
+ * Reports how long it waited, because "touch appeared after 1.4s" and
+ * "gave up after 20s" call for completely different next steps, and the
+ * boot log is often the only account of a failure anyone gets. */
+#define WAIT_POLL_MS 100
+static int wait_for_device(const char *what, struct drm_dev *drm, struct touch_dev *touch) {
+    const char *s = getenv("PICKER_WAIT_SECS");
+    int limit_ms = (s ? atoi(s) : 20) * 1000;
+    if (limit_ms < 0) limit_ms = 0;
+
+    int waited = 0;
+    for (;;) {
+        if ((drm ? drm_open_first_connected(drm) : touch_open(touch)) == 0) {
+            if (waited)
+                fprintf(stderr, "picker: %s appeared after %d.%03ds\n",
+                        what, waited / 1000, waited % 1000);
+            return 0;
+        }
+        if (waited >= limit_ms) {
+            if (limit_ms)
+                fprintf(stderr, "picker: gave up waiting for %s after %ds\n",
+                        what, limit_ms / 1000);
+            return -1;
+        }
+        usleep(WAIT_POLL_MS * 1000);
+        waited += WAIT_POLL_MS;
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "usage: %s <menu.tsv>\n", argv[0]);
@@ -744,14 +777,32 @@ int main(int argc, char **argv) {
     }
     g_entries = entries;
 
+    /* Booted from the initramfs we are in a footrace with driver probe:
+     * init reaches this point within ~0.85s of the kernel starting
+     * (measured from a real boot log), while i915 and the I2C-HID touch
+     * controller are still enumerating. Run by hand on a booted system
+     * everything settled minutes ago, which is why this never showed up
+     * in testing - the first two real boot attempts both died here with
+     * "no touch input device found" while the panel was merely late.
+     *
+     * The retry lives HERE, not in init, on purpose. What counts as a
+     * usable touch device is decided by touch_open()'s scoring
+     * (INPUT_PROP_DIRECT + multitouch, after five Wacom sub-interfaces
+     * once made a capability-bit match pick the wrong node). init can
+     * only approximate that from shell, and its approximation - "does
+     * any /dev/input/event* exist" - was satisfied instantly by the
+     * unrelated event0-2 that are present from the start, so it waited
+     * for nothing and picker still found no touch. A proxy for a check
+     * is a second definition that can disagree with the real one; the
+     * component that owns the criteria should own the waiting. */
     struct drm_dev drm;
-    if (drm_open_first_connected(&drm) != 0) {
+    if (wait_for_device("connected DRM output", &drm, NULL) != 0) {
         fprintf(stderr, "picker: no connected DRM output found\n");
         return 1;
     }
 
     struct touch_dev touch;
-    if (touch_open(&touch) != 0) {
+    if (wait_for_device("touch input device", NULL, &touch) != 0) {
         fprintf(stderr, "picker: no touch input device found\n");
         drm_close(&drm);
         return 1;

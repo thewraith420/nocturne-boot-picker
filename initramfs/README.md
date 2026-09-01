@@ -122,18 +122,36 @@ has no card (`ui/picker.c:748`) or no touch device is found
 
 **A device that appears 200 ms late is indistinguishable from one that
 is missing entirely**, and both produce exactly the "nothing happened,
-straight to the desktop" that the first real boot attempt produced. So
-`init` waits for the root device, `/dev/dri/card*` and
-`/dev/input/event*` rather than sampling once
-(`PICKER_WAIT_ROOT` / `PICKER_WAIT_DRM` / `PICKER_WAIT_INPUT`, default
-15s each). Waits cost nothing when the device is already there, are
-never fatal - a timeout is logged and boot continues, so a wrong guess
-here cannot strand anyone - and the time each device took is recorded in
-the boot log, which turns "it failed" into "i915 took 3s".
+straight to the desktop" that the first real boot attempt produced.
 
-This is unproven as the cause of the first failed attempt; it is a
-known, cheap difference between the environment that has been tested and
-the one that has not.
+The second attempt confirmed it, and the boot log made it a five-minute
+diagnosis instead of a guess: `picker: no touch input device found`,
+exit 1, `/dev/dri` populated, `/dev/input` holding only `event0-2` plus
+`mice`, and a captured `dmesg` whose **last** line is at 0.851s. init
+reaches picker within about 850 ms of the kernel starting; the I2C-HID
+controller simply had not enumerated yet.
+
+**Where the waiting lives matters, and the first attempt at it got this
+wrong.** init originally waited for `/dev/input/event*` - which the
+unrelated `event0-2` satisfy instantly, so it waited zero seconds and
+picker still failed. A proxy for a check is a *second definition* of the
+thing being checked, and it disagreed with the real one. `touch_open()`
+scores candidates on `INPUT_PROP_DIRECT` + multitouch (after five Wacom
+sub-interfaces once made a naive capability-bit match pick the wrong
+node); no shell approximation of that stays correct.
+
+So the split is by who owns the criteria:
+
+- **`picker` waits for DRM and touch** (`PICKER_WAIT_SECS`, default 20,
+  0 disables), by retrying the real `drm_open_first_connected()` and
+  `touch_open()` every 100 ms. The retry re-runs the actual open, so
+  "usable device" keeps exactly one definition however the criteria
+  evolve. It reports `touch input device appeared after 1.400s` or
+  `gave up waiting ... after 20s` - different facts needing different
+  responses.
+- **`init` waits only for the root device** (`PICKER_WAIT_ROOT`,
+  default 15s), the one device whose criteria it owns: can I mount it.
+  Never fatal - a timeout is logged and boot continues.
 
 Note also that i915's DMC firmware lives on the **root** filesystem
 (`/lib/firmware/i915/`, 130 files on the Slate) and is *not* in the
