@@ -73,7 +73,17 @@ echo "MARKER_RESCUE_SHELL_REACHED"
 exit 0
 EOF
   printf '#!/bin/sh\nexit 0\n'                              > "$SB/bin/mdev"
-  printf '#!/bin/sh\necho "[0.000000] MARKER_DMESG_LINE"\n' > "$SB/bin/dmesg"
+  # Models the real failure: one early probe line, then a flood of
+  # later noise. A tailed capture loses the early line - which is
+  # exactly what made a real boot log unable to answer whether the
+  # touch driver ever probed.
+  cat > "$SB/bin/dmesg" <<'EOF'
+#!/bin/sh
+echo "[    0.100000] i2c_designware i2c_designware.0: MARKER_EARLY_I2C_PROBE"
+i=0
+while [ $i -lt 300 ]; do echo "[   14.400000] pcieport 0000:00:1c.0: PCIe Bus Error MARKER_SPAM $i"; i=$((i+1)); done
+echo "[   34.400000] MARKER_DMESG_LINE late"
+EOF
   printf '#!/bin/sh\necho "MARKER_KEXEC root=$1 linux=$2"\nexit 0\n' > "$SB/sbin/kexec-boot.sh"
   cat > "$SB/bin/discover-kernels.sh" <<EOF
 #!/bin/sh
@@ -124,6 +134,9 @@ setup happy ok 0 0; run
 both | grep -q "MARKER_KEXEC.*vmlinuz-chosen" && ok "kexecs the user's choice" || bad "did not kexec the choice"
 log  | grep -qx "outcome:  booted user selection" && ok "log outcome line exact" || bad "outcome wrong: [$(log | grep outcome)]"
 log  | grep -q "MARKER_DMESG_LINE"    && ok "log captures dmesg" || bad "no dmesg in log"
+log  | grep -q "MARKER_EARLY_I2C_PROBE" && ok "early probe line survives 300 later lines (was lost to tail -150)" || bad "early dmesg line lost - the log cannot answer 'did the driver bind'"
+log  | sed -n "/hardware probe lines/,/full, up to/p" | grep -q "MARKER_EARLY_I2C_PROBE" && ok "probe lines pulled into their own section" || bad "no probe summary section"
+log  | sed -n "/hardware probe lines/,/full, up to/p" | grep -q "MARKER_SPAM" && bad "probe section polluted with unrelated noise" || ok "probe section excludes unrelated spam"
 log  | grep -q "drew the menu"        && ok "log captures picker stderr" || bad "no picker stderr in log"
 both | grep -q "MARKER_RESCUE"        && bad "unexpectedly hit rescue" || ok "no rescue on happy path"
 log  | grep -q "waiting for"          && bad "waited despite devices being present" || ok "no wait when devices already there"

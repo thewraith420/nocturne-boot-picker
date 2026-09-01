@@ -27,7 +27,7 @@ trap 'rm -rf "$staging"' EXIT
 # is what made the first real attempt impossible to debug. They are
 # applet symlinks into the one busybox binary, so they cost no space.
 APPLETS="sh mount umount mkdir echo printf cut head awk cat ls
-         sleep dmesg uname tail sync date wc"
+         sleep dmesg uname tail sync date wc grep"
 
 say() { echo "==> $*"; }
 die() { echo "build-initramfs: $*" >&2; exit 1; }

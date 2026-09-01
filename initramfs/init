@@ -118,6 +118,18 @@ save_log() {
         echo "--- /dev/input (touch) ---"
         ls -l /dev/input 2>&1 || true
         echo
+        # The definitive account of what the input layer actually
+        # registered, with capabilities - this is the file that settled
+        # the earlier "five Wacom sub-interfaces" confusion. If touch
+        # never enumerates, its absence here is the proof; if it
+        # enumerates but picker rejects it, the EV/ABS bits say why.
+        echo "--- /proc/bus/input/devices ---"
+        cat /proc/bus/input/devices 2>/dev/null || echo "(unavailable)"
+        echo
+        # Did the I2C bus the touch controller hangs off even come up?
+        echo "--- /sys/bus/i2c/devices ---"
+        ls /sys/bus/i2c/devices 2>&1 || true
+        echo
         echo "--- picker exit code: ${picker_rc:-n/a} ---"
         echo "--- picker stderr ---"
         cat /run/picker/picker.stderr 2>/dev/null || echo "(none captured)"
@@ -125,8 +137,21 @@ save_log() {
         echo "--- menu.tsv (first 5 of $(cat /run/picker/menu.tsv 2>/dev/null | wc -l 2>/dev/null) entries) ---"
         head -n5 /run/picker/menu.tsv 2>/dev/null || echo "(no menu)"
         echo
-        echo "--- dmesg (last 150 lines) ---"
-        dmesg 2>/dev/null | tail -n150 || echo "(dmesg unavailable)"
+        # Pulled out first, because the whole dmesg below is long and
+        # the question is nearly always "did this device's driver bind".
+        echo "--- hardware probe lines (i2c/hid/input/drm/mmc) ---"
+        dmesg 2>/dev/null | grep -iE "i2c|hid|input|wacom|designware|drm|i915|mmc|elan|atmel" \
+            || echo "(no matching lines - the driver never logged anything)"
+        echo
+        # NOT tailed. This started as `tail -n150` and that window turned
+        # out to span 14.4s-34.4s on a real failure: early boot, where
+        # I2C/HID probe, had scrolled out entirely - flooded away by
+        # repeating "PCIe Bus Error: severity=Correctable" lines - so the
+        # log could not answer the one question being asked of it. The
+        # ring buffer is bounded anyway; a generous cap beats a window
+        # positioned exactly where the answer isn't.
+        echo "--- dmesg (full, up to 2000 lines) ---"
+        dmesg 2>/dev/null | head -n2000 || echo "(dmesg unavailable)"
     } > "$BOOT_LOG" 2>/dev/null || \
         echo "picker: (failed to write $BOOT_LOG)" >&2
     # Flush before kexec: the new kernel does not replay this page cache.
