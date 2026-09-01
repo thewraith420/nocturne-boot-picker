@@ -92,6 +92,34 @@ on selection.
   `init` calls, and clearing `init`'s executable bit each produce a
   specific failure.
 
+## This init loads no kernel modules - drivers must be built in
+
+`init` mounts `/proc`, `/sys`, `/dev`, runs `mdev -s`, and goes
+straight to work. There is no `modprobe`, no `/lib/modules`, and no
+module dependency resolution in the image. Everything the picker
+touches therefore has to be **built into the picker kernel** (`=y`),
+not a module (`=m`):
+
+| Needed for | Config |
+| --- | --- |
+| finding the root partition at all | `MMC_SDHCI_PCI`, `MMC_BLOCK`, `EXT4_FS` |
+| drawing anything | `DRM`, `DRM_I915` |
+| touch | `I2C_HID`, `I2C_HID_ACPI`, `HID_MULTITOUCH`, `INPUT_EVDEV` |
+| the entire point | `KEXEC` |
+
+Verified against BobZKernel's `configs/config-7.1-picker`
+(`picker-kernel` branch): all of the above are `=y` there, so the two
+halves fit. **Don't let these drift to `=m`** - the failure is
+particularly unhelpful, because without the eMMC driver the root mount
+fails before anything can be displayed, so it lands in the rescue
+shell with no picker and no obvious reason why.
+
+This is also why the image can't just be booted with the *installed*
+BobZKernel to skip waiting on a picker-kernel build: that kernel has
+`DRM_I915`, `HID_MULTITOUCH`, `I2C_HID_ACPI` and `MMC_SDHCI_PCI` all
+as modules (checked on the Slate), so it would drop to the rescue
+shell immediately.
+
 **Not started:**
 - `mdev.conf` / static `/dev` table for the touch + DRM devices
 - confirming `/bin/sh` (the rescue-shell fallback) and a keyboard input
