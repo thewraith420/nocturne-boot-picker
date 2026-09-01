@@ -111,6 +111,37 @@ else
     ipath=/boot/picker/initramfs.img
 fi
 
+# The picker kernel needs the same panel quirks every other entry on
+# this machine already carries. Without i915.enable_dpcd_backlight=2 and
+# i915.enable_psr=0 the Slate's panel produces NO VISIBLE OUTPUT - and
+# it fails silently in the worst way: drmModeSetCrtc returns success, so
+# picker's own error handling has nothing to catch. Modeset works, the
+# backlight simply never lights. That cost a boot cycle where the entire
+# chain (root mount, discovery, DRM, touch, render, timeout, kexec) ran
+# perfectly against a black screen.
+#
+# Rather than hardcode the quirks, take them from /proc/cmdline: the
+# running system is BY DEFINITION a working display configuration on
+# this hardware, so whatever makes the panel light up now gets carried
+# to the picker. Only i915.* is copied - root=, quiet, splash and
+# crashkernel belong to the real OS, not to an initramfs that mounts its
+# own root and wants its diagnostics visible.
+if [ -n "${PICKER_CMDLINE+x}" ]; then
+    picker_cmdline=$PICKER_CMDLINE
+    say "using PICKER_CMDLINE from the environment"
+else
+    picker_cmdline=$(tr ' ' '\n' < /proc/cmdline | grep '^i915\.' | tr '\n' ' ' | sed 's/ *$//')
+fi
+
+if [ -n "$picker_cmdline" ]; then
+    say "picker kernel cmdline: $picker_cmdline"
+else
+    echo "install-picker: note: no i915.* options found in /proc/cmdline, so the" >&2
+    echo "  picker entry gets a bare kernel line. If the picker boots to a black" >&2
+    echo "  screen but the boot log shows it ran fine, this is the first suspect:" >&2
+    echo "  set PICKER_CMDLINE='...' and re-run." >&2
+fi
+
 say "adding menu entry to $CUSTOM_CFG (no grub regeneration)"
 touch "$CUSTOM_CFG"
 # Replace any previous block so re-running doesn't stack duplicates.
@@ -125,7 +156,7 @@ menuentry 'Boot Picker (touch)' --id picker {
         insmod part_gpt
         insmod ext2
         search --no-floppy --fs-uuid --set=root $boot_uuid
-        linux   $kpath
+        linux   $kpath $picker_cmdline
         initrd  $ipath
 }
 $END_MARK

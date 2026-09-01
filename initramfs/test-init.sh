@@ -99,6 +99,7 @@ echo "picker mock: drew the menu" >&2
 echo 'SELECTED_LINUX=/boot/vmlinuz-chosen'
 echo 'SELECTED_INITRD=/boot/initrd.img-chosen'
 echo 'SELECTED_CMDLINE=ro quiet'
+echo 'SELECTED_BY=timeout'
 exit 0
 EOF
     ;;
@@ -165,6 +166,7 @@ log  | grep -q "MARKER_EARLY_I2C_PROBE" && ok "early probe line survives 300 lat
 log  | sed -n "/hardware probe lines/,/full, up to/p" | grep -q "MARKER_EARLY_I2C_PROBE" && ok "probe lines pulled into their own section" || bad "no probe summary section"
 log  | sed -n "/hardware probe lines/,/full, up to/p" | grep -q "MARKER_SPAM" && bad "probe section polluted with unrelated noise" || ok "probe section excludes unrelated spam"
 log  | grep -q "drew the menu"        && ok "log captures picker stderr" || bad "no picker stderr in log"
+log  | grep -qx "chosen_by=timeout"   && ok "log distinguishes timeout auto-boot from a real tap" || bad "chosen_by wrong: [$(log | grep chosen_by)]"
 both | grep -q "MARKER_RESCUE"        && bad "unexpectedly hit rescue" || ok "no rescue on happy path"
 log  | grep -q "waiting for"          && bad "waited despite devices being present" || ok "no wait when devices already there"
 

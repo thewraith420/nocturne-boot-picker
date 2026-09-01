@@ -105,6 +105,11 @@ save_log() {
         printf '%s' "$stages"
         echo
         echo "--- selection ---"
+        # "user" vs "timeout" matters: a boot where the panel stayed
+        # dark and the timeout fired looks, downstream, exactly like one
+        # where someone chose an entry. It reported "booted user
+        # selection" for a boot nobody could even see.
+        echo "chosen_by=${SELECTED_BY:-unknown}"
         echo "linux=${SELECTED_LINUX:-}"
         echo "initrd=${SELECTED_INITRD:-}"
         echo "cmdline=${SELECTED_CMDLINE:-}"

@@ -853,6 +853,11 @@ int main(int argc, char **argv) {
     int timer_fd = -1;
     int seconds_left = timeout_secs;
     int countdown_cancelled = 0;
+    /* Distinguishes the timeout's auto-boot from a real tap. Without
+     * this both look identical downstream, and a boot where the panel
+     * stayed dark and the timeout fired reported itself as "booted user
+     * selection" - which reads as though someone chose it. */
+    int g_selected_by_timeout = 0;
     if (timeout_secs > 0) {
         timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
         struct itimerspec its = {.it_value = {.tv_sec = 1}, .it_interval = {.tv_sec = 1}};
@@ -912,6 +917,7 @@ int main(int argc, char **argv) {
                 seconds_left -= (int)ticks;
                 if (seconds_left <= 0) {
                     g_selected = 0;
+                    g_selected_by_timeout = 1;
                 } else if (countdown_label) {
                     lv_label_set_text_fmt(countdown_label, "Booting default in %ds - tap to choose", seconds_left);
                 }
@@ -983,5 +989,8 @@ int main(int argc, char **argv) {
     shell_quote(stdout, "SELECTED_INITRD", entries[g_selected].initrd_path);
     shell_quote(stdout, "SELECTED_CMDLINE", entries[g_selected].cmdline);
     if (g_set_default) shell_quote(stdout, "SET_DEFAULT", "1");
+    shell_quote(stdout, "SELECTED_BY", g_selected_by_timeout ? "timeout" : "user");
+    fprintf(stderr, "picker: selection made by %s\n",
+            g_selected_by_timeout ? "TIMEOUT (nothing was tapped)" : "user tap");
     return 0;
 }
