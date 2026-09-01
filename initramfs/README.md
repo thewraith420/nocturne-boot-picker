@@ -65,11 +65,41 @@ on selection.
   interaction) was also verified end-to-end with mocked
   discover-kernels.sh/picker/kexec-boot.sh.
 
+- `build-initramfs.sh` - assembles everything above plus busybox,
+  `kexec`, `ui/picker` and the libraries they're linked against into a
+  gzipped cpio image (~2MB compressed, ~4MB unpacked). **Run it on the
+  Slate**, or somewhere with a matching userland: it bundles the local
+  libc, so a mismatch means a picker that won't start on the target.
+  Everything it needs is checked up front and named individually -
+  a missing `kexec` or unbuilt `ui/picker` fails the build with an
+  apt/make line to fix it, rather than producing an image that panics
+  at boot with no console to explain why. Device nodes are created
+  under `fakeroot`, so no root is needed to build.
+- `verify-initramfs.sh` - unpacks a built image and checks the things
+  that would otherwise only surface as a bare kernel panic: `/init`
+  exists, is executable, and its shebang points at a shell that's
+  actually *in the image*; every absolute path `init` references is
+  present (that list is read out of `init` itself, so it can't drift
+  out of sync); every ELF binary's `DT_NEEDED` libraries **and its
+  dynamic loader** are present *inside the image* rather than merely on
+  the build host - the classic cause of "kernel can't run init" with no
+  further explanation; no dangling busybox applet symlinks; and
+  `/dev/console` and `/dev/null` exist as real character devices, since
+  without them `init`'s own error messages and the rescue shell have
+  nowhere to go. Runs automatically at the end of a build, and can be
+  pointed at any image by hand. Confirmed to actually catch breakage,
+  not just pass: deliberately removing `libdrm`, removing a script
+  `init` calls, and clearing `init`'s executable bit each produce a
+  specific failure.
+
 **Not started:**
 - `mdev.conf` / static `/dev` table for the touch + DRM devices
 - confirming `/bin/sh` (the rescue-shell fallback) and a keyboard input
   path actually exist/work in the assembled initramfs - the rescue
   shell is only a real safety net if something can actually be typed
   into it
-- the build script that assembles all of this plus `ui/picker` (see
-  `ui/README.md`), `kexec-tools`, and busybox into a cpio image
+- **actually booting it.** Nothing has yet run this image for real:
+  every test so far has run `ui/picker` by hand from a VT on the
+  already-running OS, so `init` has never been PID 1 and
+  `kexec-boot.sh` has never actually kexec'd anything. The image builds
+  and verifies clean, which is a different claim from "it boots."
