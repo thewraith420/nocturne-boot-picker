@@ -575,6 +575,11 @@ static void edit_cb(lv_event_t *e) {
 
     lv_obj_t *save_btn = lv_msgbox_add_footer_button(ctx->mbox, "Save");
     lv_obj_t *cancel_btn = lv_msgbox_add_footer_button(ctx->mbox, "Cancel");
+    /* Same 43px hardcoded footer/header height as the confirm dialog. */
+    lv_obj_set_height(lv_msgbox_get_footer(ctx->mbox), LV_SIZE_CONTENT);
+    lv_obj_set_height(lv_msgbox_get_header(ctx->mbox), LV_SIZE_CONTENT);
+    lv_obj_set_height(save_btn, DIALOG_BTN_H);
+    lv_obj_set_height(cancel_btn, DIALOG_BTN_H);
     lv_obj_add_event_cb(save_btn, edit_save_cb, LV_EVENT_CLICKED, ctx);
     lv_obj_add_event_cb(cancel_btn, edit_cancel_cb, LV_EVENT_CLICKED, ctx);
 }
@@ -599,6 +604,14 @@ static void open_confirm_dialog(int idx) {
     lv_obj_t *cancel_btn = lv_msgbox_add_footer_button(mbox, "Cancel");
 
     lv_obj_t *footer = lv_msgbox_get_footer(mbox);
+    /* The footer and header classes default to a hardcoded
+     * LV_DPI_DEF/3 (43px) height - same "constant unrelated to the
+     * real display" problem as lv_msgbox's width. Two rows of
+     * DIALOG_BTN_H buttons need ~230px, so without this they render
+     * as a squashed unreadable strip (seen on hardware). Let both
+     * size to their content instead. */
+    lv_obj_set_height(footer, LV_SIZE_CONTENT);
+    lv_obj_set_height(lv_msgbox_get_header(mbox), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(footer, LV_FLEX_FLOW_ROW_WRAP);
     /* Zero the inherited flex gap - otherwise two 50%-width buttons'
      * combined width plus that gap exceeds the row, so each wraps onto
