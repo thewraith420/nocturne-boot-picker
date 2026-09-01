@@ -107,6 +107,23 @@ EOF
   esac
   chmod +x "$SB"/bin/* "$SB"/sbin/*
 
+  # Applet dir for BUSYBOX mode. Placed AFTER $SB/bin in PATH so the
+  # mocks above still win; this only supplies the real utilities init
+  # calls (grep/head/cat/ls/...). init runs under busybox in the actual
+  # initramfs, so testing it under dash+coreutils tests the wrong
+  # userspace - the same mistake that let the hand-run picker tests miss
+  # everything the initramfs later hit.
+  if [ -n "${USE_BUSYBOX:-}" ]; then
+    mkdir -p "$SB/bbin"
+    # APPLETS is a multi-line quoted assignment; pull the whole thing.
+    applets=$(sed -n '/^APPLETS="/,/"$/p' "$REPO/initramfs/build-initramfs.sh" \
+              | tr '\n' ' ' | sed 's/.*APPLETS="//; s/".*//')
+    [ -n "$applets" ] || { echo "TEST BUG: could not parse APPLETS" >&2; exit 2; }
+    for a in $applets; do
+      busybox --list 2>/dev/null | grep -qx "$a" && ln -sf "$(command -v busybox)" "$SB/bbin/$a"
+    done
+  fi
+
   # --- the real init, redirected into the sandbox -------------------
   sed -e "s|/bin/|$SB/bin/|g" -e "s|/sbin/|$SB/sbin/|g" \
       -e "s|/mnt/root|$SB/mnt/root|g" -e "s|/run/picker|$SB/run/picker|g" \
@@ -120,10 +137,20 @@ EOF
 # the mock instead of init - which looks exactly like "init dropped to
 # rescue immediately" and cost a debugging round.
 run() {
-  PATH="$SB/bin:$SB/sbin:$PATH" \
+  # PATH: mocks first (they must win), then busybox applets in busybox
+  # mode, then the host - unless STRICT_BB, which drops the host
+  # entirely so busybox has to supply everything. Built with plain
+  # logic: a nested ${VAR:+...}${VAR:-...} pair here silently produced
+  # "$SB/bbin1" and 10 bogus failures, which is the same expansion trap
+  # that duplicated the log outcome line earlier.
+  _path="$SB/bin:$SB/sbin"
+  if [ -n "${USE_BUSYBOX:-}" ]; then _path="$_path:$SB/bbin"; fi
+  if [ -z "${STRICT_BB:-}" ];  then _path="$_path:$PATH"; fi
+
+  PATH="$_path" \
   REAL_ROOT_DEV="$SB/dev/rootdev" PICKER_FALLBACK_PAUSE=0 \
   PICKER_WAIT_ROOT=${W:-3} PICKER_WAIT_DRM=${W:-3} PICKER_WAIT_INPUT=${W:-3} \
-    /bin/sh "$SB/init" >"$SB/out" 2>"$SB/err"
+    ${TEST_SH:-/bin/sh} "$SB/init" >"$SB/out" 2>"$SB/err"
 }
 
 log()  { cat "$SB/mnt/root/boot/picker-last-boot.log" 2>/dev/null; }
@@ -181,5 +208,22 @@ both | grep -q "MARKER_RESCUE_SHELL_REACHED" && ok "drops to rescue rather than 
 both | grep -q "MARKER_KEXEC"                && bad "kexec'd with no root!" || ok "does not kexec"
 
 echo
-echo "passed: $pass   failed: $fail"
-[ "$fail" -eq 0 ]
+echo "passed: $pass   failed: $fail  (${MODE_NAME:-dash + coreutils})"
+[ "$fail" -eq 0 ] || exit 1
+
+# init runs under BUSYBOX in the real initramfs, so a pass under
+# dash+coreutils proves less than it looks. Re-run the whole suite
+# against busybox with the host PATH removed, so busybox has to supply
+# everything. Testing the wrong userspace is how the hand-run picker
+# tests missed every problem the initramfs later hit.
+if [ -z "${USE_BUSYBOX:-}" ]; then
+  if command -v busybox >/dev/null 2>&1; then
+    echo
+    USE_BUSYBOX=1 STRICT_BB=1 MODE_NAME="busybox (host PATH removed)" \
+      TEST_SH="$(command -v busybox) sh" "$0" "$@"
+  else
+    echo
+    echo "NOTE: busybox not installed - skipped the busybox pass, which is"
+    echo "      the userspace init actually runs under. Install busybox-static."
+  fi
+fi
