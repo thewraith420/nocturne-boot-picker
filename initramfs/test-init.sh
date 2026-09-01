@@ -25,18 +25,30 @@ setup() {
 
   # Fake device tree. "late" has a helper create the nodes after a
   # delay, modelling a driver that binds just after init gets there.
-  mkdir -p "$SB"/dev
+  mkdir -p "$SB"/dev "$SB"/sys/class/drm/card0-eDP-1
   : > "$SB/dev/rootdev"
+  conn() { echo "$1" > "$SB/sys/class/drm/card0-eDP-1/status"; }
   case "$devmode" in
     present) mkdir -p "$SB"/dev/dri "$SB"/dev/input
-             : > "$SB/dev/dri/card0"; : > "$SB/dev/input/event0" ;;
+             : > "$SB/dev/dri/card0"; : > "$SB/dev/input/event0"; conn connected ;;
     # Staggered on purpose: i915 and I2C-HID are separate drivers that
     # bind at different moments, so both waits get exercised. Creating
     # them simultaneously makes the second wait a no-op and silently
     # stops testing it.
-    late)    ( sleep 2; mkdir -p "$SB"/dev/dri;   : > "$SB/dev/dri/card0"
-               sleep 2; mkdir -p "$SB"/dev/input; : > "$SB/dev/input/event0" ) & ;;
-    never)   ;;
+    # Three separate arrivals, in the order real hardware does it: the
+    # card node, then the panel reporting connected, then the touch
+    # controller. Collapsing any two makes the later wait a no-op and
+    # silently stops testing it.
+    late)    conn disconnected
+             ( sleep 2; mkdir -p "$SB"/dev/dri; : > "$SB/dev/dri/card0"
+               sleep 1; conn connected
+               sleep 1; mkdir -p "$SB"/dev/input; : > "$SB/dev/input/event0" ) & ;;
+    # The case waiting on the card node alone would sail straight past:
+    # i915 has published cardN, but the panel is not reporting connected
+    # yet, so drm_open_first_connected() would still reject it.
+    notconn) mkdir -p "$SB"/dev/dri "$SB"/dev/input
+             : > "$SB/dev/dri/card0"; : > "$SB/dev/input/event0"; conn disconnected ;;
+    never)   conn disconnected ;;
   esac
 
   # --- mocks -------------------------------------------------------
@@ -82,6 +94,7 @@ EOF
   sed -e "s|/bin/|$SB/bin/|g" -e "s|/sbin/|$SB/sbin/|g" \
       -e "s|/mnt/root|$SB/mnt/root|g" -e "s|/run/picker|$SB/run/picker|g" \
       -e "s|/dev/dri|$SB/dev/dri|g" -e "s|/dev/input|$SB/dev/input|g" \
+      -e "s|/sys/class/drm|$SB/sys/class/drm|g" \
       "$REPO/initramfs/init" > "$SB/init"
 }
 
@@ -137,7 +150,8 @@ echo "=== 6. THE RACE: devices appear 2s late (was an instant silent failure) ==
 W=10 setup late ok 0 0 late; W=10 run
 both | grep -q "waiting for DRM device"      && ok "waits instead of sampling once" || bad "did not wait"
 log  | grep -qE "DRM device .* appeared after [0-9]+s" && ok "records how long DRM took" || bad "no appearance timing: [$(log | grep -i drm | head -2)]"
-log  | grep -qE "touch input device appeared after [0-9]+s" && ok "waits for touch too" || bad "no touch wait recorded"
+log  | grep -qE "touch input device .* appeared after [0-9]+s" && ok "waits for touch too" || bad "no touch wait recorded"
+log  | grep -qE "connected DRM output appeared after [0-9]+s" && ok "waits for the connector to report connected" || bad "no connector wait: [$(log | grep -i connect | head -2)]"
 both | grep -q "MARKER_KEXEC.*vmlinuz-chosen" && ok "still boots the user's choice" || bad "lost the selection"
 log  | grep -q "TIMEOUT"                     && bad "reported a timeout despite devices arriving" || ok "no spurious timeout"
 
@@ -146,6 +160,12 @@ W=2 setup never crash 0 0 never; W=2 run
 log  | grep -q "TIMEOUT: DRM device"         && ok "logs the timeout explicitly" || bad "timeout not logged"
 both | grep -q "MARKER_KEXEC.*vmlinuz-real"  && ok "still falls back to a bootable kernel" || bad "did not boot anything"
 both | grep -q "MARKER_RESCUE"               && bad "stranded the user in rescue" || ok "does not strand the user"
+
+echo "=== 8. card node present but connector NOT connected (the sufficiency gap) ==="
+W=2 setup notconn crash 0 0 notconn; W=2 run
+log  | grep -q "TIMEOUT: connected DRM output" && ok "waits on connector status, not just the card node" || bad "sailed past a disconnected panel: [$(log | grep -iE 'timeout|connect' | head -3)]"
+log  | grep -q "TIMEOUT: DRM device"           && bad "wrongly reported the card node missing" || ok "card-node wait passed (it IS present)"
+both | grep -q "MARKER_KEXEC.*vmlinuz-real"    && ok "still falls back to a bootable kernel" || bad "did not boot anything"
 
 echo
 echo "passed: $pass   failed: $fail"

@@ -62,21 +62,44 @@ have_any() {
     for _f in $1; do [ -e "$_f" ] && return 0; done
     return 1
 }
-wait_for() {
+
+# A card node is necessary but NOT sufficient. picker's
+# drm_open_first_connected() (ui/picker.c:264) opens /dev/dri/cardN and
+# then requires a connector that is actually connected; i915 can publish
+# the card node before the eDP connector has finished reporting, so
+# waiting on the node alone can still hand picker a card it rejects -
+# failing for the same reason, just slightly later.
+drm_connected() {
+    for _s in /sys/class/drm/card*-*/status; do
+        [ -r "$_s" ] || continue
+        read _v < "$_s" 2>/dev/null || continue
+        [ "$_v" = "connected" ] && return 0
+    done
+    return 1
+}
+
+# $1 = description, $2 = name of a predicate function, $3 = seconds.
+wait_until() {
     _n=0
-    have_any "$2" && return 0
-    stage "waiting for $1 ($2)"
+    "$2" && return 0
+    stage "waiting for $1"
     while [ "$_n" -lt "$3" ]; do
         sleep 1
         _n=$((_n + 1))
-        if have_any "$2"; then
+        if "$2"; then
             stage "$1 appeared after ${_n}s"
             return 0
         fi
     done
-    stage "TIMEOUT: $1 ($2) never appeared after ${3}s"
+    stage "TIMEOUT: $1 never appeared after ${3}s"
     return 1
 }
+
+# Path/glob flavour of the above. POSIX sh has no closures, so the
+# pattern goes through a global the predicate reads.
+_wait_glob=""
+_have_wait_glob() { have_any "$_wait_glob"; }
+wait_for() { _wait_glob=$2; wait_until "$1 ($2)" _have_wait_glob "$3"; }
 
 # $1 = outcome summary. Writes the log to the real root, which is
 # mounted read-only, so this borrows the same brief remount dance
@@ -194,6 +217,7 @@ export PICKER_ROTATE
 # Both of these are hard requirements for picker: it returns non-zero
 # rather than degrading if either is absent.
 wait_for "DRM device (i915)" "/dev/dri/card*" "${PICKER_WAIT_DRM:-15}"
+wait_until "connected DRM output" drm_connected "${PICKER_WAIT_DRM:-15}"
 wait_for "touch input device" "/dev/input/event*" "${PICKER_WAIT_INPUT:-15}"
 
 stage "running picker"
