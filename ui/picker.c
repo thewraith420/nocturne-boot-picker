@@ -70,6 +70,14 @@
  * ~337px per key row, comfortably over the ~1cm touch target. */
 #define KEYBOARD_PCT_H 45
 #define EDIT_TA_H 220      /* ~4 wrapped lines of the 36px font */
+/* Confirm dialog's 2x2 button grid. These two are coupled: the row has
+ * to fit 2*DIALOG_BTN_W plus one DIALOG_BTN_GAP, so widening the
+ * buttons back to 50% makes any nonzero gap overflow and wrap the grid
+ * into a 4x1 stack. 47%+47% leaves 6% of the footer for the gap, which
+ * at this dialog width is ~60px of room for a 28px gap. Asserted in
+ * test-edit-layout.c so the pair cannot drift apart unnoticed. */
+#define DIALOG_BTN_W_PCT 47
+#define DIALOG_BTN_GAP 28
 #define VT_RELEASE_SIG SIGUSR1
 #define VT_ACQUIRE_SIG SIGUSR2
 #define POLL_PERIOD_MS 30
@@ -672,15 +680,17 @@ static void open_confirm_dialog(int idx) {
     lv_obj_set_height(footer, LV_SIZE_CONTENT);
     lv_obj_set_height(lv_msgbox_get_header(mbox), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(footer, LV_FLEX_FLOW_ROW_WRAP);
-    /* Zero the inherited flex gap - otherwise two 50%-width buttons'
-     * combined width plus that gap exceeds the row, so each wraps onto
-     * its own line instead of forming a 2x2 grid. Found by testing:
-     * looked like a plain 4-row stack with the gap left in. */
-    lv_obj_set_style_pad_column(footer, 0, 0);
-    lv_obj_set_style_pad_row(footer, 0, 0);
+    /* The gap and the button width are a matched pair. Two 50%-width
+     * buttons plus ANY nonzero gap exceed the row, so the grid wraps
+     * into a 4x1 stack - found by testing, and the reason this was
+     * pinned to zero gap and 50% width for a while. Narrowing the
+     * buttons to DIALOG_BTN_W_PCT buys the room for a real gap, so the
+     * buttons are no longer edge-to-edge. Change one, check the other. */
+    lv_obj_set_style_pad_column(footer, DIALOG_BTN_GAP, 0);
+    lv_obj_set_style_pad_row(footer, DIALOG_BTN_GAP, 0);
     lv_obj_t *footer_btns[4] = {edit_btn, default_btn, confirm_btn, cancel_btn};
     for (int i = 0; i < 4; i++) {
-        lv_obj_set_width(footer_btns[i], lv_pct(50));
+        lv_obj_set_width(footer_btns[i], lv_pct(DIALOG_BTN_W_PCT));
         /* Explicit touch target: the theme sizes these from the font
          * alone, which left them ~13px (about 1mm) tall on this panel -
          * measured, not guessed. DIALOG_BTN_H is ~1cm at the panel's
