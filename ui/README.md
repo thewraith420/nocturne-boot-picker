@@ -130,53 +130,61 @@ resolution and never told rotation is happening at all.
 - `signalfd`/`timerfd`/`poll()` mechanics for VT cooperation and the
   auto-boot timeout previously verified working (raw-DRM version); the
   same code carried over unchanged.
-- `touch_open()`'s device-selection fix (preferring `INPUT_PROP_DIRECT`
-  over capability-bits-only matching, after real hardware showed touch
-  completely dead - selecting one of the Slate's non-touch Wacom
-  sub-interfaces instead of the real digitizer): verified against real
-  kernel-level virtual input devices, not mocked. Created three actual
-  `/dev/input` nodes via `/dev/uinput` reproducing the exact bug shape -
-  two "pointer"-prop devices (one with plain `ABS_X`, one with
-  `ABS_MT_POSITION_X` - the actual trap that fooled the old logic) both
-  enumerated *before* a third `INPUT_PROP_DIRECT` device with matching
-  MT axes - and ran the real extracted `touch_open()` against them,
-  confirming it correctly skips both pointer-prop devices despite the
-  ordering and picks the direct one. Actually opening the resulting
-  `/dev/input/eventN` node hit a real permissions wall in this sandbox
-  (not in `input` group, no passwordless sudo) - not expected to apply
-  on the Slate, where the picker runs as root - so the device-open step
-  itself still needs on-device confirmation, but the selection logic
-  that was actually wrong has real-device-backed verification now.
+Touch on this hardware took three real-hardware rounds to actually fix
+- each one genuinely progressed the diagnosis, none was a wasted guess,
+but none alone was sufficient either:
 
-- **Touch down/up detection**: after the `INPUT_PROP_DIRECT` fix above
-  landed, real-hardware retest showed `touch_open()` now correctly
-  selects `/dev/input/event5` ("WCOM50C1:00 2D1F:486C UNKNOWN",
-  `INPUT_PROP_DIRECT=yes`) - but touch still didn't register at all.
-  Root cause: this device is driven by `hid_multitouch` (Type B
-  multitouch protocol, matching this project's own confirmed hardware
-  facts - Wacom often supplies the silicon, but the generic
-  `hid_multitouch` kernel driver binds it), which signals finger
-  down/up via `ABS_MT_TRACKING_ID` (a real ID means down, `-1` means
-  lifted) - it sends no `BTN_TOUCH` at all, which was the only signal
-  the touch loop was watching. Fixed by also treating
-  `ABS_MT_TRACKING_ID` transitions as a down/up source, alongside
-  `BTN_TOUCH` for devices that do send it. Verified with real
-  `struct input_event` records pushed through a real pipe (not mocked
-  function calls) into the actual event-handling loop copied
-  verbatim: a Type-B-style sequence (tracking ID assigned/positions/
-  `-1` to lift, no `BTN_TOUCH`) correctly drives `touch_down` through
-  1 then back to 0, and a plain `BTN_TOUCH`-only sequence still works
-  identically to before (no regression for devices that do send it).
+1. **Device selection, round 1**: `touch_open()` originally picked the
+   first `/dev/input/eventN` matching `ABS_MT_POSITION_X`/`ABS_X`
+   capability bits. The Slate exposes five Wacom (`WCOM50C1`)
+   sub-interfaces sharing one physical pen+touch controller, and
+   capability bits alone don't distinguish the real finger digitizer
+   from pen/stylus telemetry channels. Fixed to prefer
+   `INPUT_PROP_DIRECT` ("touchscreen, not pointer") over plain
+   capability matching - verified against real kernel-level `/dev/uinput`
+   devices reproducing the bug shape (two pointer-prop devices, one
+   with `ABS_MT_POSITION_X`, enumerated before a direct one; correctly
+   picked the direct one regardless of order). Real-hardware retest:
+   correctly stopped selecting a pointer device, but still landed on
+   the wrong one (`event5`) - `INPUT_PROP_DIRECT` alone isn't unique
+   either, since three of the five Wacom nodes report it.
+2. **Down/up signal**: with `event5` selected, touch still didn't
+   register at all. Reasoned that `event5` might be `hid_multitouch`
+   (Type B protocol, matching this project's confirmed hardware facts),
+   which signals finger down/up via `ABS_MT_TRACKING_ID` rather than
+   `BTN_TOUCH` - fixed to also watch tracking-ID transitions, verified
+   with real `struct input_event` records through a real pipe into the
+   actual event loop. Real-hardware retest: no change at all - this
+   diagnosis was itself wrong, because `event5` was never the real
+   digitizer to begin with (see below), so no fix to *its* down/up
+   signal could have helped.
+3. **Device selection, round 2 - the actual fix**: pulled a full
+   `/proc/bus/input/devices` dump over SSH and decoded every Wacom
+   node's real `ABS` bitmask by hand rather than guessing again.
+   Only one of the five (`event2`, unsuffixed base interface) has
+   `ABS_MT_SLOT`/`ABS_MT_TRACKING_ID`/true `ABS_MT_POSITION_X` at all -
+   `event4` ("Stylus") and `event5` ("UNKNOWN", the one twice
+   mis-selected) both report `INPUT_PROP_DIRECT` but only ever expose
+   plain `ABS_X`/`ABS_Y` plus pressure/tilt, i.e. pen telemetry, not
+   touch. Fixed by scoring every candidate as `is_direct*2 + is_mt*1`
+   and keeping the highest - a true-multitouch `DIRECT` device now
+   outranks a `DIRECT`-but-`ABS_X`-only one unconditionally. Confirmed
+   against the real decoded capability data for all five actual Slate
+   devices (not synthetic ones this time): `event2` scores strictly
+   higher (3) than every other node (max 2), so the fix isn't even
+   order-dependent for this specific hardware. Also broadened the
+   stderr diagnostic to print whether `multitouch=yes/no` was used, not
+   just `INPUT_PROP_DIRECT`, since that distinction is what round 1's
+   diagnostic was missing.
 
 ## Real-hardware results so far (`f866572` + touch fixes)
 
 Confirmed on the Slate: DRM master + i915 modeset work through LVGL's
 render path; `PICKER_ROTATE=270` is the correct upright orientation;
 the `VT_SETMODE` fix works (no repeat of the Ctrl+Alt+F1 hang). Touch
-was found completely dead, root-caused in two steps (wrong device
-selected, then wrong down/up signal watched even once the right
-device was selected) - see the two `touch_open()`/event-loop fixes
-above, not yet retested on hardware.
+took three rounds to root-cause (above) - the `event2`/multitouch-
+scoring fix has real-data-backed confirmation but not yet an actual
+on-device retest.
 
 ## Still needed, on real hardware
 

@@ -332,22 +332,35 @@ static int device_is_direct(int fd) {
 }
 
 /* Some hardware exposes several /dev/input/eventN nodes that all
- * satisfy the ABS_MT_POSITION_X/ABS_X capability check - e.g. a
- * combo Wacom pen+touch controller advertising multiple
- * pen/stylus/mouse sub-interfaces alongside the actual finger
- * digitizer. Capability bits alone aren't enough to tell them apart;
- * INPUT_PROP_DIRECT is the kernel's actual "this is a touchscreen, not
- * a pointer device" signal, found necessary by real-hardware testing
- * after capability-only selection silently locked onto a non-touch
- * node and touch never registered at all. Scans every candidate
- * rather than stopping at the first match, preferring one that
- * declares INPUT_PROP_DIRECT; falls back to the first capability-only
- * match if none does. */
+ * satisfy some capability check - e.g. a combo Wacom pen+touch
+ * controller advertising multiple pen/stylus/mouse sub-interfaces
+ * alongside the actual finger digitizer. Capability bits alone aren't
+ * enough to tell them apart. Two real-hardware rounds were needed to
+ * find the right signal:
+ *
+ * 1. INPUT_PROP_DIRECT ("touchscreen, not pointer device") rules out
+ *    plain pointer/mouse-emulation sub-interfaces - but on this
+ *    hardware *three* of the five Wacom nodes report DIRECT (the real
+ *    finger digitizer, plus two pen/stylus telemetry channels that
+ *    also happen to be DIRECT), so DIRECT alone still isn't unique.
+ * 2. True multitouch capability (ABS_MT_SLOT/ABS_MT_TRACKING_ID, not
+ *    just a plain ABS_X/ABS_Y fallback) is what actually distinguishes
+ *    the real finger digitizer from the pen-telemetry DIRECT nodes,
+ *    which only ever report ABS_X/ABS_Y/ABS_PRESSURE/ABS_TILT_* -
+ *    confirmed by decoding a real /proc/bus/input/devices dump: only
+ *    one of the five nodes has ABS_MT_SLOT/ABS_MT_POSITION_X/
+ *    ABS_MT_TRACKING_ID at all, and it's not the one either prior fix
+ *    picked.
+ *
+ * So this scores every candidate as direct*2 + is_mt*1 and keeps the
+ * highest, which puts a true-MT+DIRECT device above a DIRECT-but-
+ * ABS_X-only one, which is in turn above a non-DIRECT match - ties go
+ * to whichever is found first. */
 static int touch_open(struct touch_dev *t) {
     DIR *dir = opendir("/dev/input");
     if (!dir) return -1;
     struct dirent *de;
-    int found_fd = -1, found_direct = 0;
+    int found_fd = -1, found_direct = 0, found_is_mt = 0, found_score = -1;
     int found_code_x = 0, found_code_y = 0;
     struct input_absinfo found_abs_x = {0}, found_abs_y = {0};
     char found_path[300] = "";
@@ -364,13 +377,15 @@ static int touch_open(struct touch_dev *t) {
             close(fd);
             continue;
         }
-        int code_x, code_y;
+        int code_x, code_y, is_mt;
         if (bit_set(absbits, ABS_MT_POSITION_X)) {
             code_x = ABS_MT_POSITION_X;
             code_y = ABS_MT_POSITION_Y;
+            is_mt = 1;
         } else if (bit_set(absbits, ABS_X)) {
             code_x = ABS_X;
             code_y = ABS_Y;
+            is_mt = 0;
         } else {
             close(fd);
             continue;
@@ -382,7 +397,8 @@ static int touch_open(struct touch_dev *t) {
         }
 
         int is_direct = device_is_direct(fd);
-        if (found_fd < 0 || (is_direct && !found_direct)) {
+        int score = is_direct * 2 + is_mt;
+        if (score > found_score) {
             if (found_fd >= 0) close(found_fd);
             found_fd = fd;
             found_code_x = code_x;
@@ -390,6 +406,8 @@ static int touch_open(struct touch_dev *t) {
             found_abs_x = ax;
             found_abs_y = ay;
             found_direct = is_direct;
+            found_is_mt = is_mt;
+            found_score = score;
             snprintf(found_path, sizeof(found_path), "%s", path);
             char name[256] = "?";
             ioctl(fd, EVIOCGNAME(sizeof(name)), name);
@@ -401,8 +419,8 @@ static int touch_open(struct touch_dev *t) {
     closedir(dir);
     if (found_fd < 0) return -1;
 
-    fprintf(stderr, "picker: touch device: %s (\"%s\"), INPUT_PROP_DIRECT=%s\n",
-            found_path, found_name, found_direct ? "yes" : "no");
+    fprintf(stderr, "picker: touch device: %s (\"%s\"), INPUT_PROP_DIRECT=%s, multitouch=%s\n",
+            found_path, found_name, found_direct ? "yes" : "no", found_is_mt ? "yes" : "no");
 
     t->fd = found_fd;
     t->code_x = found_code_x;
