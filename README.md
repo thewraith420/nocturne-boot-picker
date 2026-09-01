@@ -4,134 +4,247 @@ A touch-driven boot picker for the Google Pixel Slate (`nocturne`), TWRP-style �
 replacing GRUB's mouse/keyboard-only menu with something you can actually use
 on a tablet with no keyboard attached.
 
-**Status: framework only.** This repo is scaffolding + a design doc, laid down
-so a fresh work session has a concrete starting point. No code has been
-written yet. This is a deliberately separate project from
-[BobZKernel](https://github.com/thewraith420/BobZKernel) (which builds the
-*real* installed kernels this picker will boot into) — different shape of
-work: BobZKernel is patch-and-verify against an established pipeline; this is
-designing a minimal system from scratch (kernel config, initramfs, touch UI,
-kexec flow).
+**Status: working end-to-end on real hardware.** Tap a kernel, confirm, and it
+`kexec`s straight into it. Confirmed on the Slate: touch selection, screen
+rotation, editing a kernel command line with an on-screen keyboard, and
+persisting a default. It is currently the machine's default GRUB entry.
+
+This is a deliberately separate project from
+[BobZKernel](https://github.com/thewraith420/BobZKernel), which builds the
+*real* installed kernels this picker boots into — and, on its `picker-kernel`
+branch, the minimal kernel this picker itself runs on.
 
 ## The problem
 
 The Slate is tablet-first — no permanently attached keyboard or mouse. GRUB's
-menu needs both to navigate. Today, picking a non-default kernel entry means
-finding a keyboard, or not doing it at all.
+menu needs both to navigate. Picking a non-default kernel meant finding a
+keyboard, or not doing it at all.
 
-## The design (why this is tractable, not "build a bootloader")
+## The design
 
-**UEFI/GRUB has essentially no touchscreen driver support.** That's a dead
-end - don't try to add touch input to GRUB itself.
+**UEFI/GRUB has essentially no touchscreen driver support.** That is a dead
+end — don't try to add touch input to GRUB itself.
 
-**The unlock: TWRP was never a bootloader.** It's a minimal Linux kernel +
-initramfs *recovery image* with real touch drivers, that the *real*
-bootloader (on Android, the boot partition / fastboot) hands control to
+**The unlock: TWRP was never a bootloader.** It is a minimal Linux kernel +
+initramfs with real touch drivers, that the *real* bootloader hands control to
 instead of booting normally. The same trick applies here:
 
-1. GRUB stays **completely unmodified**, timeout set short (or auto-selects
-   immediately).
-2. GRUB's default entry boots a small dedicated **picker kernel + initramfs**
-   - not a real OS, just enough Linux to draw a touch menu.
-3. The picker has **real mainline touch + DRM drivers** (see hardware facts
-   below), draws a list of available real kernels, and waits for a tap.
-4. On selection, the picker `kexec`s straight into whichever real installed
-   kernel was tapped. GRUB's own menu UI is never shown to the user at all -
-   they only ever see the touch picker.
+1. GRUB stays **completely unmodified** — no `update-grub`, no regenerated
+   `grub.cfg`, no reordered entries.
+2. A GRUB entry boots a small dedicated **picker kernel + initramfs** — not a
+   real OS, just enough Linux to draw a touch menu.
+3. The picker has **real mainline touch + DRM drivers**, parses the live
+   `grub.cfg` for available kernels, and waits for a tap.
+4. On selection it `kexec`s straight into the real kernel that was tapped.
 
-This means the actual scope is: a minimal kernel config + a small initramfs +
-a touch UI + kexec glue. Not a bootloader rewrite.
+So the scope is a minimal kernel config + a small initramfs + a touch UI +
+kexec glue. Not a bootloader rewrite.
 
-## Hardware facts (confirmed live on the machine, not guessed)
+## What a boot looks like
 
-- **Touch stack is fully generic/mainline**: `i2c_hid_acpi` -> `i2c_hid` ->
-  `hid_multitouch`. No vendor blob, no goodix/elants/silead-style out-of-tree
-  driver. This is the entire touchscreen dependency list for the picker's
-  initramfs/kernel config.
-- **Graphics is `i915`** (Intel UHD 615, Nocturne Y-series). The main OS
-  needed `i915.enable_dpcd_backlight=2 i915.enable_psr=0` for backlight to
-  work at all (see BobZKernel's pixel-slate README) - the picker kernel will
-  very likely need the same cmdline quirks or it may have a working display
-  with no visible backlight, which would look identical to "not working."
-- Display is a 3000x2000 @ 3:2 panel - the touch UI needs to render sanely at
-  that resolution/aspect, likely wants deliberately large touch targets given
-  the DPI.
+```
+GRUB  →  picker kernel  →  init (PID 1)  →  mount real root (ro)
+      →  discover-kernels.sh reads the live /boot/grub/grub.cfg
+      →  picker draws the touch menu   →  tap → confirm
+      →  kexec into the chosen kernel
+```
 
-## Division of labor (mirrors how the rest of this project has worked)
+Tapping a row opens a confirm dialog with four actions: **Boot**, **Cancel**,
+**Edit** (change this boot's kernel command line via an on-screen keyboard,
+one-time, not persisted) and **Set Default** (persist this kernel as the
+first entry for future boots).
 
-- **On-device / hardware side**: real hardware testing, one-shot GRUB edits,
-  checking actual `/boot` layout and existing kernel entries, verifying touch
-  input events live, confirming what the real kexec target list needs to look
-  like.
-- **Build environment side**: minimal kernel config iteration, initramfs
-  construction, `kexec-tools` integration, the touch menu rendering code
-  itself.
+If nothing is tapped within `PICKER_TIMEOUT_SECS` (default 10) it boots the
+first entry, exactly like GRUB's own timeout. That matters on a keyboardless
+device: it is the reason a broken touchscreen cannot strand you.
 
-Cross-session messaging (`SendMessage`/`ListAgents`) is available for this
-project's back-and-forth, instead of the handoff-doc-file pattern used
-earlier in the BobZKernel work - this project's rhythm (test on hardware ->
-report back -> adjust) suits a live channel better than documents.
+## Building and installing
 
-## Decisions
+Everything except the kernel builds **on the Slate itself** — the initramfs
+bundles the local libc, so a mismatch produces a picker that won't start.
 
-1. **Kernel config**: reuse BobZKernel's `pixel-slate` branch as the base,
-   on a dedicated `picker-kernel` branch forked from it (currently at
-   `5d8832c`). Inherits the load-bearing platform fixes for free - the i915
-   backlight quirks, the `hid_google_hammer` crash fix, the GOOG0007 button
-   fix - without polluting the real installed-kernel branch. From here the
-   config gets stripped down: drop camera/IPU3, v4l2loopback, Waydroid
-   binder, storage/network drivers, anything not needed to draw a menu and
-   `kexec`. Lives in BobZKernel's repo, not this one - see `picker-kernel/`
-   here for how it plugs into this project.
-2. **Touch UI rendering**: LVGL (reopened after real-hardware feedback -
-   originally raw DRM+fbdev for the smaller dependency footprint, but
-   Bob wants a real TWRP look - icons, color, theming - once he saw the
-   plain-text version running, which isn't a good fit for hand-rolled
-   drawing code). Bigger initramfs and another dependency to vet, but
-   gets a real themed widget/dialog UI far faster than hand-rolling one.
-   Fetched at build time (`ui/fetch-lvgl.sh`, pinned v9.2.2), not
-   vendored - see `ui/README.md` for what real-hardware-testing-in-spirit
-   (via standalone harnesses, since this dev environment has no real
-   Slate/i915/touchscreen) already found, including a real LVGL
-   rotation gotcha worth knowing before touching that code again.
-3. **Boot entry discovery**: parse the real GRUB config live, not a
-   picker-owned config file. A stale picker-owned file is actively
-   dangerous here (offers a kernel that's gone, or silently omits a new
-   one); parsing live state stays correct by construction, same reasoning
-   as decision #1. `initramfs/discover-kernels.sh` walks `menuentry`
-   stanzas at any nesting depth (real-world testing against the Slate's
-   actual `grub.cfg` showed kernels sit inside an "Advanced options"
-   submenu, not flat - no GRUB config changes needed to handle that),
-   filters to entries whose `linux` line actually points at a `vmlinuz`
-   image (excludes non-kernel entries like memtest86+), and excludes the
-   picker's own entry (`--id picker`). Verified against the real 25-entry
-   `grub.cfg` pulled from the Slate (`docs/nocturne-grub.cfg`).
+```sh
+# 1. the picker kernel (in the BobZKernel repo, picker-kernel branch)
+cd BobZKernel && ./scripts/build-kernel-7.1.sh    # auto-selects config-7.1-picker
 
-## Open questions - not yet decided, resolve these next
+# 2. the touch UI
+cd nocturne-boot-picker/ui && ./fetch-lvgl.sh && make
 
-None currently - all three original open questions are decided (see
-Decisions above). Next real milestone is on-device validation: does
-`discover-kernels.sh` correctly parse the Slate's real `grub.cfg`, and does
-the stripped `picker-kernel` branch still have working touch + display.
+# 3. the initramfs (verifies itself at the end)
+cd ../initramfs && ./build-initramfs.sh
+
+# 4. install + add the GRUB entry
+cd ../boot-integration
+sudo ./install-picker.sh /path/to/vmlinuz-picker ../initramfs/picker-initramfs.img
+```
+
+`install-picker.sh --uninstall` reverses it completely.
+
+### Why installation is deliberately paranoid
+
+The failure mode is "this machine now boots into a stripped-down kernel by
+default", so three properties are structural rather than a matter of
+remembering to be careful:
+
+- Files go in **`/boot/picker/`**, a subdirectory. GRUB's `10_linux` globs
+  `/boot/vmlinuz-*` and does not recurse, so this kernel can never be
+  auto-detected into a menu entry on its own — not now, and not during some
+  future `apt` upgrade that regenerates `grub.cfg` unattended.
+- The entry goes in **`/boot/grub/custom.cfg`**, which `41_custom` sources at
+  boot. So this **never runs `update-grub`**: the existing menu is not
+  regenerated, not reordered, and no other entry changes position.
+- It **refuses to run under `GRUB_DEFAULT=saved`**, where booting the picker
+  once would silently make it the permanent default.
+
+The kernel command line for the entry is derived from `/proc/cmdline` rather
+than hardcoded — the running system is by definition a working display
+configuration on this hardware, so whatever lights the panel now is carried
+across. Override with `PICKER_CMDLINE=...`.
+
+## Diagnostics
+
+The picker runs in a window with no journal, no scrollback, and no network. So
+every boot writes **`/boot/picker-last-boot.log`** to the real root: outcome,
+stage trail, whether the selection came from a tap or the timeout, `picker`'s
+exit code and full stderr, `/dev/dri` and `/dev/input` listings,
+`/proc/bus/input/devices`, `/sys/bus/i2c/devices`, and the full `dmesg`.
+
+On the fallback path it also prints a banner on screen and holds for
+`PICKER_FALLBACK_PAUSE` seconds (default 8) so it can be read or photographed
+before the kexec wipes the display.
+
+This exists because a silent fallback is externally indistinguishable from
+"the GRUB selection never took", and one whole boot attempt was lost to
+exactly that ambiguity.
+
+### Knobs
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `PICKER_ROTATE` | `270` (set by `init`) | Panel rotation: 0/90/180/270 |
+| `PICKER_TIMEOUT_SECS` | `10` | Auto-boot the first entry; `0` disables |
+| `PICKER_WAIT_SECS` | `20` | How long `picker` waits for DRM and touch |
+| `PICKER_WAIT_ROOT` | `15` | How long `init` waits for the root device |
+| `PICKER_FALLBACK_PAUSE` | `8` | On-screen hold before a fallback kexec |
+| `REAL_ROOT_DEV` | `/dev/mmcblk0p2` | Partition holding `/boot/grub/grub.cfg` |
+
+## Testing
+
+Both suites are confirmed to *catch* the bugs they cover — each was validated
+by deliberately reintroducing the original defect and checking the suite goes
+red, not merely by watching it pass.
+
+```sh
+bash initramfs/test-init.sh   # runs the REAL init against mocks: the fallback
+                              # chain, rescue paths, diagnostics, device waits.
+                              # Runs twice - dash+coreutils, then busybox with
+                              # the host PATH removed, since busybox is what
+                              # the initramfs actually uses.
+
+cd ui && make test            # headless LVGL: keyboard z-order, dialog and
+                              # keyboard layout, the 2x2 confirm grid shape.
+```
+
+`build-initramfs.sh` also runs `verify-initramfs.sh` automatically, which
+checks the things that otherwise surface only as a bare kernel panic: `/init`
+executable with a shebang resolving *inside the image*, every absolute path
+`init` references present (read out of `init` itself, so it cannot drift),
+every ELF's `DT_NEEDED` libraries **and dynamic loader** resolving inside the
+image, no dangling applet symlinks, and `/dev/console` + `/dev/null` as real
+character devices.
+
+## Hardware facts (confirmed on the machine, not guessed)
+
+- **Touch is fully generic/mainline**: `intel_lpss_pci` → `i2c_designware` →
+  `i2c_hid_acpi` → `hid_multitouch`, device `WCOM50C1` / `2D1F:486C`. No
+  vendor blob.
+- **Graphics is `i915`** (Intel UHD 615). The panel needs
+  `i915.enable_dpcd_backlight=2 i915.enable_psr=0` or it produces no visible
+  output.
+- **Display is 3000x2000 at ~293 PPI**, mounted rotated — `PICKER_ROTATE=270`
+  is upright. Touch targets are sized in real-world units off that DPI
+  (~1cm buttons), because the theme's own defaults come out around 1mm.
+- Root and `/boot` are the same ext4 partition, `/dev/mmcblk0p2` (eMMC).
+
+## Findings worth knowing before changing this code
+
+Each of these cost a boot cycle or more to find.
+
+- **A driver being built in does not mean the bus it attaches to exists.**
+  Touch never enumerated for three attempts with `I2C_HID`, `I2C_HID_ACPI`
+  and `HID_MULTITOUCH` all correctly `=y`. On Intel LPSS the I2C controller
+  is a *PCI* device whose MFD driver manufactures the *platform* device those
+  drivers bind to — and `MFD_INTEL_LPSS_PCI` was `=m`, so in an initramfs with
+  no modprobe the bus simply never appeared. Found by walking `/sys/devices`
+  on a machine where touch worked, not by re-reading configs.
+- **A success return is not proof of a visible result.** With the i915 quirks
+  missing, `drmModeSetCrtc` returned *success* into an unlit panel. The whole
+  chain ran perfectly — touch found, menu drawn, kexec completed — against a
+  black screen. No error handling inside `picker` could have caught it.
+- **`init` races driver probe; a hand-run test never does.** As PID 1 it
+  reaches `picker` ~0.85s after the kernel starts, while devices are still
+  enumerating. `picker` waits for its own devices by retrying the real
+  `drm_open_first_connected()` / `touch_open()`, rather than `init` guessing
+  from shell — an earlier "does any `/dev/input/event*` exist" check was
+  satisfied instantly by unrelated devices and waited zero seconds.
+  **The component that owns the criteria should own the waiting.**
+- **LVGL's default allocator is a 64 kB fixed pool.** Dialogs hung or
+  segfaulted inconsistently until `LV_USE_STDLIB_MALLOC` was switched to
+  `LV_STDLIB_CLIB`. Inconsistent results across near-identical variants is the
+  signature of a resource limit, not a logic bug. Do not "optimize" that back.
+- **Dialogs and the on-screen keyboard live on `lv_layer_top()`**, because
+  `lv_msgbox_create(NULL)` puts its backdrop there. Anything parented to
+  `lv_screen_active()` renders *under* that backdrop and receives no touches.
+- **This display is driven manually, so nothing decides a repaint is due.**
+  Content can be set, laid out and positioned correctly and still not appear
+  until something calls `lv_obj_invalidate()`.
+- **LVGL is never told about rotation.** `PICKER_ROTATE` is handled by this
+  code's own transform at exactly two points (flush callback and touch input);
+  LVGL's own rotation support hands `flush_cb` a buffer still in unrotated
+  space and hangs outright with `LV_DISPLAY_RENDER_MODE_FULL`.
 
 ## Directory layout
 
 ```
 nocturne-boot-picker/
 ├── README.md              # this file
-├── picker-kernel/         # minimal kernel config for the picker (once decided)
-├── initramfs/             # initramfs build scripts + root filesystem layout
-├── ui/                    # touch menu rendering code
-├── boot-integration/      # the GRUB entry that boots the picker + kexec glue
-└── docs/                  # hardware findings, design decisions, session logs
+├── picker-kernel/         # how the BobZKernel picker-kernel branch plugs in
+├── initramfs/             # init (PID 1), kernel discovery, build + verify + tests
+├── ui/                    # picker.c (LVGL touch menu), lv_conf.h, layout tests
+├── boot-integration/      # install-picker.sh, kexec glue, GRUB entry template
+└── docs/                  # hardware findings, the real grub.cfg used as a fixture
 ```
 
-## Where this came from
+Each directory has its own README with the reasoning behind what is in it.
 
-Proposed by a Claude session working hands-on on the Slate, mid-way through
-unrelated BobZKernel kernel-patch work (a `hid_google_hammer` crash fix and,
-separately, a firmware regression that broke the volume buttons - both
-tracked in BobZKernel's `pixel-slate` branch, unrelated to this project).
-Evaluated and agreed on by Bob and the BobZKernel-side Claude session as a
-sound design worth pursuing, explicitly as its own thread/project rather than
-folded into the kernel-patch work.
+## Design decisions
+
+1. **Kernel config**: BobZKernel's `pixel-slate` branch as the base, on a
+   dedicated `picker-kernel` branch. Inherits the load-bearing platform fixes
+   for free — i915 backlight quirks, the `hid_google_hammer` crash fix, the
+   GOOG0007 button fix — without polluting the real installed-kernel branch,
+   then stripped down. **Everything the picker touches must be `=y`**: the
+   initramfs has no modprobe and no `/lib/modules`.
+2. **Touch UI**: LVGL v9.2.2, fetched at build time (`ui/fetch-lvgl.sh`), not
+   vendored. Chosen over raw DRM drawing after seeing a plain-text version on
+   hardware — a real themed widget/dialog UI, far faster than hand-rolling one.
+3. **Boot entry discovery**: parse the real GRUB config live, not a
+   picker-owned copy. A stale copy is actively dangerous — it offers a kernel
+   that is gone, or silently omits a new one. `discover-kernels.sh` walks
+   `menuentry` stanzas at any nesting depth (real kernels sit inside "Advanced
+   options"), keeps only entries whose `linux` line points at a `vmlinuz`, and
+   excludes the picker's own entry. Verified against the Slate's real 25-entry
+   `grub.cfg`, kept as `docs/nocturne-grub.cfg`.
+
+## Recovery
+
+The picker is now the default GRUB entry, with GRUB's own timeout left in
+place. If anything in the chain misbehaves, `init` falls back to booting the
+first discovered kernel rather than stranding you, and `picker`'s own timeout
+does the same if the display or touch fails. A long power-button press is the
+hard reset. `install-picker.sh --uninstall` removes the picker entirely and
+touches nothing else.
+
+Note that with no keyboard attached, GRUB's menu cannot be navigated off the
+default — so a broken picker image would loop until a keyboard is available.
+Worth having one to hand when rebuilding the initramfs.
