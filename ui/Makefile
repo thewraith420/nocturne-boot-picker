@@ -30,12 +30,18 @@ test-edit-layout: check-lvgl test-edit-layout.o $(LVGL_OBJ)
 test-screenshot: check-lvgl test-screenshot.o $(LVGL_OBJ)
 	$(CC) $(CFLAGS) -o $@ test-screenshot.o $(LVGL_OBJ) $(LDLIBS)
 
+# Renders the real screens offscreen for documentation - includes
+# picker.c, so it is the actual UI code, not a mockup.
+render-screens: check-lvgl render-screens.o $(LVGL_OBJ)
+	$(CC) $(CFLAGS) -o $@ render-screens.o $(LVGL_OBJ) $(LDLIBS)
+
 test: test-edit-layout test-screenshot
 	./test-edit-layout
 	./test-screenshot
 
 clean:
 	rm -f picker picker.o test-edit-layout test-edit-layout.o \
-	      test-screenshot test-screenshot.o $(LVGL_OBJ)
+	      test-screenshot test-screenshot.o \
+	      render-screens render-screens.o $(LVGL_OBJ)
 
 .PHONY: clean check-lvgl test

@@ -60,22 +60,34 @@ device: it is the reason a broken touchscreen cannot strand you.
 
 ### Screenshots
 
-<img src="docs/screenshots/01-confirm-dialog.jpg" width="45%"> <img src="docs/screenshots/02-edit-keyboard.jpg" width="45%">
+<img src="docs/screenshots/01-menu.png" width="31%"> <img src="docs/screenshots/02-confirm-dialog.png" width="31%"> <img src="docs/screenshots/03-edit-dialog.png" width="31%">
 
-*Left: the kernel list with the confirm dialog open — Edit / Set Default on
-top, Boot / Cancel below. Right: Edit's on-screen keyboard, mid-session.*
+*The kernel list (checkmarks mark the saved default), the confirm dialog, and
+Edit's on-screen keyboard with the full command line wrapped for reading.*
 
-Both are unretouched phone photos of this running on the Slate, taken the
-night the whole boot chain first worked end to end. The confirm dialog
-predates the button-spacing fix, so its four buttons sit edge-to-edge here;
-they now have a gap between them. Left as it was rather than touched up —
-an honest photo of an older layout beats a corrected one.
+These are real renders of the current code, not mockups: `ui/render-screens.c`
+includes `picker.c` and calls the same `build_ui()` / `open_confirm_dialog()`
+/ Edit handler the device runs, through picker's own flush and screenshot
+paths, with a memory buffer standing in for the DRM scanout mapping. So they
+show exactly what the panel shows, at full 2000x3000, and they stay current
+by being regenerated rather than re-photographed:
 
-`picker` can capture its own screenshots, so these get replaced with real
-ones rather than phone photos next time someone is at the hardware:
-`PICKER_SCREENSHOT_DIR=/path ./picker menu.tsv` dumps the menu and each
-dialog, correctly un-rotated regardless of panel orientation. See
-[`ui/README.md`](ui/README.md#screenshots).
+```sh
+cd ui && make render-screens
+./render-screens /path/to/menu.tsv /tmp/shots && ./ppm-to-png.sh /tmp/shots/*.ppm
+```
+
+And the same thing on the actual hardware, unretouched:
+
+<img src="docs/screenshots/on-hardware-confirm.jpg" width="31%"> <img src="docs/screenshots/on-hardware-edit.jpg" width="31%">
+
+*Phone photos from the night the whole boot chain first worked end to end.
+The confirm dialog here predates the button-spacing fix, so its buttons sit
+edge-to-edge — compare the render above.*
+
+`picker` can also capture itself on the device
+(`PICKER_SCREENSHOT_DIR=/path ./picker menu.tsv`), correctly un-rotated
+regardless of panel orientation — see [`ui/README.md`](ui/README.md#screenshots).
 
 ## Building and installing
 
