@@ -60,14 +60,16 @@ device: it is the reason a broken touchscreen cannot strand you.
 
 ### Screenshots
 
-<img src="docs/screenshots/02-edit-keyboard.jpg" width="55%">
+<img src="docs/screenshots/01-confirm-dialog.jpg" width="45%"> <img src="docs/screenshots/02-edit-keyboard.jpg" width="45%">
 
-*Edit's on-screen keyboard, mid-session — a real photo of the Slate running
-this, unretouched.*
+*Left: the kernel list with the confirm dialog open — Edit / Set Default on
+top, Boot / Cancel below. Right: Edit's on-screen keyboard, mid-session.*
 
-A confirm-dialog photo was taken the same night but predates the
-button-spacing fix, so it no longer shows the current layout and is left out
-rather than presented as if it did.
+Both are unretouched phone photos of this running on the Slate, taken the
+night the whole boot chain first worked end to end. The confirm dialog
+predates the button-spacing fix, so its four buttons sit edge-to-edge here;
+they now have a gap between them. Left as it was rather than touched up —
+an honest photo of an older layout beats a corrected one.
 
 `picker` can capture its own screenshots, so these get replaced with real
 ones rather than phone photos next time someone is at the hardware:
