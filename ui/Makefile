@@ -25,10 +25,17 @@ check-lvgl:
 test-edit-layout: check-lvgl test-edit-layout.o $(LVGL_OBJ)
 	$(CC) $(CFLAGS) -o $@ test-edit-layout.o $(LVGL_OBJ) $(LDLIBS)
 
-test: test-edit-layout
+# Verifies the screenshot dump un-rotates correctly against a synthetic
+# framebuffer. Includes picker.c, so it exercises the real function.
+test-screenshot: check-lvgl test-screenshot.o $(LVGL_OBJ)
+	$(CC) $(CFLAGS) -o $@ test-screenshot.o $(LVGL_OBJ) $(LDLIBS)
+
+test: test-edit-layout test-screenshot
 	./test-edit-layout
+	./test-screenshot
 
 clean:
-	rm -f picker picker.o test-edit-layout test-edit-layout.o $(LVGL_OBJ)
+	rm -f picker picker.o test-edit-layout test-edit-layout.o \
+	      test-screenshot test-screenshot.o $(LVGL_OBJ)
 
 .PHONY: clean check-lvgl test

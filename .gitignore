@@ -20,3 +20,6 @@ initramfs/root/
 *.log
 *.swp
 ui/test-edit-layout
+ui/test-screenshot
+ui/*.ppm
+ui/*.png

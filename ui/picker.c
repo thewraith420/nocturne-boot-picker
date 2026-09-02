@@ -502,6 +502,71 @@ static void indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
 
 /* ---------------- UI ---------------- */
 
+/* ---------------- screenshots ----------------
+ *
+ * picker already mmaps the scanout buffer for its flush path, so a
+ * screenshot is just a copy of memory it is already holding - no second
+ * DRM readback path, no extra ioctls.
+ *
+ * Dumped in LOGICAL orientation (un-rotated through the same transform
+ * flush_cb uses), so the file comes out the way the tablet is held
+ * rather than the way the panel scans. A sideways screenshot needs
+ * hand-rotating before it is any use in a README.
+ *
+ * Triggered by PICKER_SCREENSHOT_DIR rather than a signal: in the real
+ * boot there is no shell in the initramfs to send one from, and
+ * event-triggered dumps are repeatable across test rounds in a way that
+ * "press the thing at the right moment" is not.
+ *
+ * PPM because it is ~15 lines of code and needs no zlib in the
+ * initramfs; ui/ppm-to-png.sh converts afterwards on a normal machine. */
+static struct picker_ctx *g_ctx;
+static const char *g_shot_dir;
+static const char *g_shot_pending;
+static int g_shot_n;
+
+static void screenshot(const char *tag) {
+    if (!g_shot_dir || !g_ctx || !g_ctx->drm->map) return;
+    struct drm_dev *d = g_ctx->drm;
+    int cw = g_ctx->cw, ch = g_ctx->ch;
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%02d-%s.ppm", g_shot_dir, ++g_shot_n, tag);
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        fprintf(stderr, "picker: screenshot %s: %s\n", path, strerror(errno));
+        return;
+    }
+    fprintf(f, "P6\n%d %d\n255\n", cw, ch);
+
+    unsigned char *row = malloc((size_t)cw * 3);
+    if (!row) { fclose(f); return; }
+    for (int ly = 0; ly < ch; ly++) {
+        for (int lx = 0; lx < cw; lx++) {
+            int px, py;
+            logical_to_physical(g_ctx->rot, cw, ch, lx, ly, &px, &py);
+            uint32_t c = 0;
+            if (px >= 0 && py >= 0 && (uint32_t)px < d->width && (uint32_t)py < d->height)
+                c = *(uint32_t *)(d->map + (size_t)py * d->stride + (size_t)px * 4);
+            row[lx * 3 + 0] = (c >> 16) & 0xff;  /* XRGB8888 */
+            row[lx * 3 + 1] = (c >> 8) & 0xff;
+            row[lx * 3 + 2] = c & 0xff;
+        }
+        fwrite(row, 1, (size_t)cw * 3, f);
+    }
+    free(row);
+    fclose(f);
+    fprintf(stderr, "picker: screenshot -> %s (%dx%d)\n", path, cw, ch);
+}
+
+/* Requested from inside an event callback, taken by the main loop after
+ * the next lv_timer_handler(): the dialog that triggered it has not
+ * been drawn yet at callback time, and forcing a redraw from inside
+ * LVGL's own event dispatch is asking for re-entrancy trouble. */
+static void screenshot_soon(const char *tag) {
+    if (g_shot_dir) g_shot_pending = tag;
+}
+
 static volatile int g_selected = -1;
 static volatile int g_set_default = 0;
 static struct entry *g_entries;
@@ -649,6 +714,7 @@ static void edit_cb(lv_event_t *e) {
      * be found on a panel. */
     lv_obj_update_layout(ctx->mbox);
     lv_obj_invalidate(lv_layer_top());
+    screenshot_soon("edit-dialog");
 }
 
 /* 2x2 footer grid (Edit/Set Default on top, Boot/Cancel below),
@@ -715,6 +781,7 @@ static void open_confirm_dialog(int idx) {
     lv_obj_add_event_cb(default_btn, set_default_cb, LV_EVENT_CLICKED, mbox);
     lv_obj_add_event_cb(confirm_btn, confirm_cb, LV_EVENT_CLICKED, mbox);
     lv_obj_add_event_cb(cancel_btn, cancel_cb, LV_EVENT_CLICKED, mbox);
+    screenshot_soon("confirm-dialog");
 }
 
 static void row_click_cb(lv_event_t *e) {
@@ -885,6 +952,12 @@ int main(int argc, char **argv) {
         .ch = (rot == ROT_90 || rot == ROT_270) ? (int)drm.width : (int)drm.height,
     };
 
+    g_ctx = &ctx;
+    /* Directory must already exist - picker does not create it, so a
+     * typo'd path fails loudly at the first dump rather than silently
+     * scattering files somewhere unexpected. */
+    g_shot_dir = getenv("PICKER_SCREENSHOT_DIR");
+
     lv_init();
     /* Route LVGL's own warnings to stderr - never stdout, which
      * carries the SELECTED_* contract that initramfs/init sources.
@@ -1046,6 +1119,17 @@ int main(int argc, char **argv) {
         }
 
         if (have_master) lv_timer_handler();
+
+        /* After the render, so the dialog that asked for this is
+         * actually on screen. The first one is the menu itself. */
+        if (g_shot_dir && have_master) {
+            if (g_shot_pending) {
+                screenshot(g_shot_pending);
+                g_shot_pending = NULL;
+            } else if (g_shot_n == 0) {
+                screenshot("menu");
+            }
+        }
     }
 
     close(touch.fd);

@@ -258,3 +258,44 @@ Reads a `title\tlinux\tinitrd\tcmdline` list from
 (see `initramfs/init`), writes the selected entry back out as
 shell-sourceable `SELECTED_LINUX`/`SELECTED_INITRD`/`SELECTED_CMDLINE`
 assignments on stdout, plus `SET_DEFAULT=1` if "Set Default" was used.
+
+## Screenshots
+
+`picker` can dump what is on screen, for documentation and for comparing
+test rounds without relying on phone photos:
+
+```sh
+mkdir -p /tmp/shots
+sudo PICKER_ROTATE=270 PICKER_SCREENSHOT_DIR=/tmp/shots ./picker /tmp/menu.tsv
+./ppm-to-png.sh /tmp/shots/*.ppm
+```
+
+It writes `01-menu.ppm` once the menu is drawn, then `NN-confirm-dialog.ppm`
+and `NN-edit-dialog.ppm` as those open — so tapping through once yields a
+complete set of the UI in a single run, repeatably.
+
+Three implementation notes, since each was a deliberate choice:
+
+- **No second DRM readback path.** `picker` already mmaps the scanout buffer
+  for its flush callback, so a screenshot is a copy of memory it is already
+  holding. No extra ioctls, nothing to keep in sync.
+- **Dumped in logical orientation**, un-rotated through the same transform
+  `flush_cb` uses. The panel is mounted rotated, so a raw framebuffer dump
+  comes out sideways and needs hand-rotating before it is any use. Verified
+  against a synthetic framebuffer in `test-screenshot.c` (`make test`),
+  because a transposed axis would otherwise only show up as a garbled image.
+- **Env var, not a signal.** In the real boot there is no shell in the
+  initramfs to send a signal from, and event-triggered dumps are repeatable
+  across test rounds in a way that "press the thing at the right moment"
+  is not.
+
+PPM keeps the in-picker code to ~15 lines and needs no zlib in the initramfs;
+`ppm-to-png.sh` converts afterwards, using ImageMagick if present and
+otherwise python3's standard library (no pillow needed).
+
+Note these are written wherever `PICKER_SCREENSHOT_DIR` points, which must
+already exist. Running `picker` by hand from a VT is the intended way to
+capture them — during a real boot the initramfs has no writable place to keep
+them, so wiring that up would mean copying them out during `init`'s existing
+read-write remount window. Not done, since hand-running is how UI testing
+happens anyway.
