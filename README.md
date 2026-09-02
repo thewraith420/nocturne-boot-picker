@@ -60,22 +60,20 @@ device: it is the reason a broken touchscreen cannot strand you.
 
 ### Screenshots
 
-<img src="docs/screenshots/01-confirm-dialog.jpg" width="45%"> <img src="docs/screenshots/02-edit-keyboard.jpg" width="45%">
+<img src="docs/screenshots/02-edit-keyboard.jpg" width="55%">
 
-*Left: the confirm dialog's 2x2 grid (Boot / Cancel / Edit / Set Default).
-Right: Edit's on-screen keyboard, mid-session.*
+*Edit's on-screen keyboard, mid-session — a real photo of the Slate running
+this, unretouched.*
 
-These are phone photos of the real thing running on the Pixel Slate, not
-mockups — taken during the first night the whole boot chain worked end to
-end. The confirm dialog photo predates the button-spacing fix and has been
-lightly touched up (a gap drawn in to approximate the corrected layout)
-since the fix landed after the photo was taken but before this was written.
+A confirm-dialog photo was taken the same night but predates the
+button-spacing fix, so it no longer shows the current layout and is left out
+rather than presented as if it did.
 
-Going forward, `picker` can dump real screenshots itself —
-`PICKER_SCREENSHOT_DIR=/path ./picker menu.tsv` writes out the menu and each
-dialog as PPM, correctly un-rotated regardless of panel orientation. See
-[`ui/README.md`](ui/README.md#screenshots) for details. These two will get
-replaced with real captures next time someone's at the hardware.
+`picker` can capture its own screenshots, so these get replaced with real
+ones rather than phone photos next time someone is at the hardware:
+`PICKER_SCREENSHOT_DIR=/path ./picker menu.tsv` dumps the menu and each
+dialog, correctly un-rotated regardless of panel orientation. See
+[`ui/README.md`](ui/README.md#screenshots).
 
 ## Building and installing
 
