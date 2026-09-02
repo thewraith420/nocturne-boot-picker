@@ -58,6 +58,25 @@ If nothing is tapped within `PICKER_TIMEOUT_SECS` (default 10) it boots the
 first entry, exactly like GRUB's own timeout. That matters on a keyboardless
 device: it is the reason a broken touchscreen cannot strand you.
 
+### Screenshots
+
+<img src="docs/screenshots/01-confirm-dialog.jpg" width="45%"> <img src="docs/screenshots/02-edit-keyboard.jpg" width="45%">
+
+*Left: the confirm dialog's 2x2 grid (Boot / Cancel / Edit / Set Default).
+Right: Edit's on-screen keyboard, mid-session.*
+
+These are phone photos of the real thing running on the Pixel Slate, not
+mockups — taken during the first night the whole boot chain worked end to
+end. The confirm dialog photo predates the button-spacing fix and has been
+lightly touched up (a gap drawn in to approximate the corrected layout)
+since the fix landed after the photo was taken but before this was written.
+
+Going forward, `picker` can dump real screenshots itself —
+`PICKER_SCREENSHOT_DIR=/path ./picker menu.tsv` writes out the menu and each
+dialog as PPM, correctly un-rotated regardless of panel orientation. See
+[`ui/README.md`](ui/README.md#screenshots) for details. These two will get
+replaced with real captures next time someone's at the hardware.
+
 ## Building and installing
 
 Everything except the kernel builds **on the Slate itself** — the initramfs
