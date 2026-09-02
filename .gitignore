@@ -24,3 +24,4 @@ ui/test-screenshot
 ui/*.ppm
 ui/*.png
 ui/render-screens
+ui/test-flush

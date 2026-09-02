@@ -35,13 +35,20 @@ test-screenshot: check-lvgl test-screenshot.o $(LVGL_OBJ)
 render-screens: check-lvgl render-screens.o $(LVGL_OBJ)
 	$(CC) $(CFLAGS) -o $@ render-screens.o $(LVGL_OBJ) $(LDLIBS)
 
-test: test-edit-layout test-screenshot
+# Proves the optimised flush_cb is pixel-identical to the per-pixel
+# version it replaced, for every rotation.
+test-flush: check-lvgl test-flush.o $(LVGL_OBJ)
+	$(CC) $(CFLAGS) -o $@ test-flush.o $(LVGL_OBJ) $(LDLIBS)
+
+test: test-edit-layout test-screenshot test-flush
 	./test-edit-layout
 	./test-screenshot
+	./test-flush
 
 clean:
 	rm -f picker picker.o test-edit-layout test-edit-layout.o \
 	      test-screenshot test-screenshot.o \
-	      render-screens render-screens.o $(LVGL_OBJ)
+	      render-screens render-screens.o \
+	      test-flush test-flush.o $(LVGL_OBJ)
 
 .PHONY: clean check-lvgl test

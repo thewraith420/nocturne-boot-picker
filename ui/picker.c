@@ -478,16 +478,79 @@ struct picker_ctx {
 
 static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
     struct picker_ctx *ctx = lv_display_get_user_data(disp);
-    int w = area->x2 - area->x1 + 1;
-    uint32_t *src = (uint32_t *)px_map;
-    for (int ly = area->y1; ly <= area->y2; ly++) {
-        for (int lx = area->x1; lx <= area->x2; lx++) {
-            int px, py;
-            logical_to_physical(ctx->rot, ctx->cw, ctx->ch, lx, ly, &px, &py);
-            if (px < 0 || py < 0 || (uint32_t)px >= ctx->drm->width || (uint32_t)py >= ctx->drm->height) continue;
-            uint32_t color = src[(ly - area->y1) * w + (lx - area->x1)];
-            uint32_t *dst_row = (uint32_t *)(ctx->drm->map + (size_t)py * ctx->drm->stride);
-            dst_row[px] = color;
+    struct drm_dev *d = ctx->drm;
+    const int cw = ctx->cw, ch = ctx->ch;
+    const int aw = area->x2 - area->x1 + 1;   /* source row stride */
+
+    /* Clamp once rather than bounds-testing every pixel. Given the
+     * cw/ch invariant (they are the drm dimensions, swapped for 90/270)
+     * a logical point inside the display always maps to a physical one
+     * inside the framebuffer, so this is the only check needed. */
+    const int x1 = area->x1 < 0 ? 0 : area->x1;
+    const int y1 = area->y1 < 0 ? 0 : area->y1;
+    const int x2 = area->x2 >= cw ? cw - 1 : area->x2;
+    const int y2 = area->y2 >= ch ? ch - 1 : area->y2;
+    if (x1 > x2 || y1 > y2) { lv_display_flush_ready(disp); return; }
+
+    /* The fast paths below drop the old per-pixel bounds test, which
+     * is only safe while cw/ch really are the framebuffer dimensions
+     * (swapped for 90/270). That holds wherever picker sets them up,
+     * but "holds today" is not a memory-safety argument: if it were
+     * ever violated the specialised loops would write past the
+     * framebuffer, trading a visible glitch for silent corruption. So
+     * check it once per flush - two comparisons - and skip the frame
+     * rather than scribble. A dropped frame in an impossible
+     * configuration is a cheap price for that guarantee. */
+    const int exp_cw = (ctx->rot == ROT_90 || ctx->rot == ROT_270) ? (int)d->height : (int)d->width;
+    const int exp_ch = (ctx->rot == ROT_90 || ctx->rot == ROT_270) ? (int)d->width  : (int)d->height;
+    if (cw != exp_cw || ch != exp_ch) {
+        static int warned;
+        if (!warned) {
+            warned = 1;
+            fprintf(stderr, "picker: display %dx%d does not match framebuffer %ux%u "
+                            "for rotation - skipping flush\n", cw, ch, d->width, d->height);
+        }
+        lv_display_flush_ready(disp);
+        return;
+    }
+
+    const int w = x2 - x1 + 1;
+    uint8_t *const map = d->map;
+    const size_t stride = d->stride;
+
+    /* Specialised per rotation, with the case hoisted out of the inner
+     * loop. Previously this called logical_to_physical() per pixel - a
+     * switch and two multiplies six million times for a full-screen
+     * refresh. Rotation is fixed for the life of the process, so the
+     * work is loop-invariant; for ROT_0 the row is contiguous and
+     * becomes a memcpy, and 90/270 walk a physical column by adding or
+     * subtracting the stride. Proven pixel-identical to the old
+     * per-pixel version for all four rotations in test-flush.c. */
+    for (int ly = y1; ly <= y2; ly++) {
+        const uint32_t *srow = (const uint32_t *)px_map
+                             + (size_t)(ly - area->y1) * aw + (x1 - area->x1);
+        switch (ctx->rot) {
+        case ROT_90: {
+            /* px = ch-1-ly (constant down the row), py = lx */
+            uint8_t *p = map + (size_t)x1 * stride + (size_t)(ch - 1 - ly) * 4;
+            for (int i = 0; i < w; i++, p += stride) *(uint32_t *)p = srow[i];
+            break;
+        }
+        case ROT_180: {
+            uint32_t *drow = (uint32_t *)(map + (size_t)(ch - 1 - ly) * stride)
+                           + (cw - 1 - x1);
+            for (int i = 0; i < w; i++) drow[-i] = srow[i];
+            break;
+        }
+        case ROT_270: {
+            /* px = ly (constant), py = cw-1-lx */
+            uint8_t *p = map + (size_t)(cw - 1 - x1) * stride + (size_t)ly * 4;
+            for (int i = 0; i < w; i++, p -= stride) *(uint32_t *)p = srow[i];
+            break;
+        }
+        default:
+            memcpy((uint32_t *)(map + (size_t)ly * stride) + x1, srow, (size_t)w * 4);
+            break;
         }
     }
     lv_display_flush_ready(disp);
