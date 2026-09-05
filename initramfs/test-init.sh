@@ -157,11 +157,29 @@ EOF
   fi
 
   # --- the real init, redirected into the sandbox -------------------
+  #
+  # In busybox mode the mocks need shell functions, not just PATH.
+  # Ubuntu builds busybox with FEATURE_SH_STANDALONE, so `busybox sh`
+  # resolves applet names from its OWN table and never consults PATH -
+  # a $SB/bin/mount mock is simply ignored and the real mount runs.
+  # (Debian's busybox is built without it, so PATH mocking works there:
+  # the same suite passed on one machine and failed 28 assertions on the
+  # other, for reasons that had nothing to do with init.) Functions are
+  # resolved before builtins and applets in every POSIX shell, so
+  # shadowing is the one interception that works in both builds.
+  shadow=
+  if [ -n "${USE_BUSYBOX:-}" ]; then
+    for a in mount dmesg mdev; do
+      shadow="$shadow$a() { \"$SB/bin/$a\" \"\$@\"; }
+"
+    done
+  fi
   sed -e "s|/bin/|$SB/bin/|g" -e "s|/sbin/|$SB/sbin/|g" \
       -e "s|/mnt/root|$SB/mnt/root|g" -e "s|/run/picker|$SB/run/picker|g" \
       -e "s|/dev/dri|$SB/dev/dri|g" -e "s|/dev/input|$SB/dev/input|g" \
       -e "s|/sys/class/drm|$SB/sys/class/drm|g" \
-      "$REPO/initramfs/init" > "$SB/init"
+      "$REPO/initramfs/init" > "$SB/init.body"
+  { head -n1 "$SB/init.body"; printf '%s' "$shadow"; tail -n +2 "$SB/init.body"; } > "$SB/init"
 }
 
 # NB: run the interpreter by ABSOLUTE path. $SB/bin/sh is the mocked
