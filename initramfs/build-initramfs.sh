@@ -27,7 +27,8 @@ trap 'rm -rf "$staging"' EXIT
 # is what made the first real attempt impossible to debug. They are
 # applet symlinks into the one busybox binary, so they cost no space.
 APPLETS="sh mount umount mkdir echo printf cut head awk cat ls
-         sleep dmesg uname tail sync date wc grep"
+         sleep dmesg uname tail sync date wc grep
+         tar chroot tee"
 
 say() { echo "==> $*"; }
 die() { echo "build-initramfs: $*" >&2; exit 1; }
@@ -52,6 +53,7 @@ picker_bin=$repo/ui/picker
   cd $repo/ui && ./fetch-lvgl.sh && make"
 
 for f in "$here/init" "$here/discover-kernels.sh" "$here/apply-default.sh" \
+         "$here/discover-tarballs.sh" "$here/install-kernel.sh" \
          "$repo/boot-integration/kexec-boot.sh"; do
     [ -r "$f" ] || die "missing source file: $f"
 done
@@ -83,6 +85,8 @@ install -m 0755 "$picker_bin" "$staging/bin/picker"
 install -m 0755 "$here/init"                        "$staging/init"
 install -m 0755 "$here/discover-kernels.sh"         "$staging/bin/discover-kernels.sh"
 install -m 0755 "$here/apply-default.sh"            "$staging/bin/apply-default.sh"
+install -m 0755 "$here/discover-tarballs.sh"        "$staging/bin/discover-tarballs.sh"
+install -m 0755 "$here/install-kernel.sh"           "$staging/bin/install-kernel.sh"
 install -m 0755 "$repo/boot-integration/kexec-boot.sh" "$staging/sbin/kexec-boot.sh"
 
 # ------------------------------------------------------------ shared libraries

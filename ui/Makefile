@@ -19,6 +19,13 @@ check-lvgl:
 %.o: %.c lv_conf.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
+# The harnesses and the renderer #include picker.c so they exercise the
+# real functions rather than copies. That makes picker.c a dependency
+# make cannot see on its own - without this they silently keep testing
+# and rendering whatever picker.c looked like when they were last built,
+# which is the "green suite proving nothing" failure in its purest form.
+test-edit-layout.o test-screenshot.o test-flush.o render-screens.o: picker.c
+
 # Headless regression test for the Edit dialog's z-order - the keyboard
 # rendered fine and was dead to touch because it sat under the msgbox
 # backdrop. Structural, so it needs no panel.

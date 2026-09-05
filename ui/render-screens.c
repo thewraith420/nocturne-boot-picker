@@ -61,17 +61,38 @@ int main(int argc, char **argv) {
                                               lv_color_hex(0x8ec6ff), true, LV_FONT_DEFAULT);
     lv_display_set_theme(disp, theme);
 
+    /* A couple of fake tarballs so the Install menu has something to
+     * draw - discover-tarballs.sh supplies these for real. */
+    static struct tarball tb[2] = {
+        { "/home/bob/buildstuff/BobZKernel-7.2.3-pixel-slate-installer.tar.gz",
+          "7.2.3-pixel-slate", "110M" },
+        { "/home/bob/buildstuff/BobZKernel-7.2.2-pixel-slate-installer.tar.gz",
+          "7.2.2-pixel-slate", "110M" },
+    };
+    g_tarballs = tb; g_tarball_n = 2;
+
     lv_obj_t *countdown_label = NULL;
-    build_ui(entries, n, 10, &countdown_label);
+    build_ui(entries, n, 30, &countdown_label);
     /* The countdown label only gets its text on the first timer tick,
      * so without this the render shows LVGL's placeholder "Text" where
      * the device shows the countdown - an inaccuracy introduced by the
      * renderer itself, which rather defeats the point. */
     if (countdown_label)
-        lv_label_set_text_fmt(countdown_label, "Booting default in %ds - tap to choose", 10);
+        lv_label_set_text_fmt(countdown_label, "Booting default in %ds - tap to choose", 30);
     lv_refr_now(disp);
     screenshot("menu");
 
+    /* Walk the new menu structure using the real screen builders. */
+    show_kernel_list();
+    lv_refr_now(disp);
+    screenshot("kernel-list");
+
+    show_install_list();
+    lv_refr_now(disp);
+    screenshot("install-list");
+
+    show_kernel_list();
+    lv_refr_now(disp);
     /* The real confirm dialog, opened by the real function. */
     open_confirm_dialog(1);
     lv_refr_now(disp);

@@ -41,6 +41,30 @@ on selection.
   /dev/null fd2 just became, silently discarding the on-screen error
   replay) and a duplicated outcome string from pairing `${v:+...}` with
   `${v:-...}`.
+- `discover-tarballs.sh` - finds installable kernel tarballs
+  (`*-installer.tar.gz`) under `/home` and `/root` on the real system, for
+  the Install menu, emitting `path\tversion\tsize`. Deliberately does not
+  open them: the authoritative kernel release is inside as
+  `boot/vmlinuz-<release>`, but a `.tar.gz` must be decompressed
+  end-to-end to read its index - seconds each for 120MB archives, on
+  every boot, to populate a menu most boots never open. The filename is
+  enough to choose from, and `install-kernel.sh` reads the real release
+  from the archive when it matters. Uses shell globs rather than
+  `find(1)` so the image needs no extra applet.
+- `install-kernel.sh` - installs one of those tarballs. Unpacking
+  `boot/` and `lib/modules/` is the easy half; `depmod`,
+  `update-initramfs` and `update-grub` run **inside the real system via
+  chroot**, using its own tools against its own configuration, because
+  reimplementing initramfs generation in busybox would be both large and
+  subtly wrong. Doing this from the picker is worth something precisely
+  because the root filesystem is not in use - no package manager locks,
+  no running kernel having its modules swapped underneath it. Additive
+  by design: nothing is deleted, so every currently-bootable kernel
+  (including whatever you would fall back to) stays bootable, and
+  `update-grub` regenerating `grub.cfg` is safe for the picker because
+  its own entry lives in `custom.cfg`, which `grub-mkconfig` never
+  rewrites. The root goes back to read-only on the way out, including on
+  failure.
 - `discover-kernels.sh` - parses a GRUB config for `menuentry` stanzas at
   any nesting depth (real kernels turned out to live inside an "Advanced
   options" submenu, not flat - see `docs/nocturne-grub.cfg`) into a

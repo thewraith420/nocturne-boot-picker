@@ -57,13 +57,22 @@
 #include "lvgl.h"
 
 #define MAX_ENTRIES 128
-#define DEFAULT_TIMEOUT_SECS 10
+/* Generous on purpose: this is a failsafe for a dead touchscreen, not
+ * a hurry-up. At 10s the menu felt like it was rushing you into a
+ * choice. Any tap cancels it permanently, so a long value costs
+ * nothing once you are actually interacting. */
+#define DEFAULT_TIMEOUT_SECS 30
 /* Pixel Slate panel: 3000x2000 @ 12.3" -> sqrt(3000^2+2000^2)/12.3
  * =~ 293 px/inch. The theme scales its padding/spacing from this, and
  * it's what makes the size constants below mean real-world distances. */
 #define PANEL_DPI 293
 #define DIALOG_BTN_H 115   /* ~1cm at 293 PPI - comfortable touch target */
 #define ROW_H 130          /* kernel list row: ~1.1cm, fits the 36px font */
+/* The top menu has two entries on a 3000px-tall screen, so list-sized
+ * rows leave it looking like an error state. Double height reads as a
+ * deliberate choice and gives a bigger target for the one screen you
+ * always touch. */
+#define MENU_ROW_H (ROW_H * 2)
 /* Edit dialog. The keyboard takes the bottom of the screen and the
  * dialog is capped to what remains, so these two are related: raising
  * one shrinks the other. 45% of a 3000px-tall logical display leaves
@@ -88,6 +97,15 @@ struct entry {
     char initrd_path[256];
     char cmdline[512];
     int is_default;
+};
+
+/* An installable kernel tarball, as found by
+ * initramfs/discover-tarballs.sh. Same "shell finds it, picker only
+ * draws it" split as menu.tsv. */
+struct tarball {
+    char path[256];
+    char version[128];
+    char size[32];
 };
 
 /* ---------------- menu.tsv ---------------- */
@@ -115,6 +133,32 @@ static int load_entries(const char *path, struct entry *entries, int max) {
         snprintf(entries[n].initrd_path, sizeof(entries[n].initrd_path), "%s", fields[2] ? fields[2] : "");
         snprintf(entries[n].cmdline, sizeof(entries[n].cmdline), "%s", fields[3] ? fields[3] : "");
         entries[n].is_default = (fields[4] && fields[4][0] == '1');
+        n++;
+    }
+    fclose(fp);
+    return n;
+}
+
+/* path\tversion\tsize, one per line. Missing file is not an error -
+ * it just means the Install menu comes up empty. */
+static int load_tarballs(const char *path, struct tarball *tb, int max) {
+    FILE *fp = fopen(path, "r");
+    if (!fp) return 0;
+    char line[600];
+    int n = 0;
+    while (n < max && fgets(line, sizeof(line), fp)) {
+        line[strcspn(line, "\n")] = '\0';
+        char *f[3] = {0};
+        char *p = line;
+        for (int i = 0; i < 3 && p; i++) {
+            f[i] = p;
+            char *tab = strchr(p, '\t');
+            if (tab) { *tab = '\0'; p = tab + 1; } else { p = NULL; }
+        }
+        if (!f[0] || f[0][0] == '\0') continue;
+        snprintf(tb[n].path, sizeof(tb[n].path), "%s", f[0]);
+        snprintf(tb[n].version, sizeof(tb[n].version), "%s", f[1] ? f[1] : f[0]);
+        snprintf(tb[n].size, sizeof(tb[n].size), "%s", f[2] ? f[2] : "?");
         n++;
     }
     fclose(fp);
@@ -631,6 +675,10 @@ static void screenshot_soon(const char *tag) {
 }
 
 static volatile int g_selected = -1;
+/* Set instead of g_selected when the user picks a tarball to install.
+ * The main loop exits on either, and exactly one of SELECTED_LINUX or
+ * INSTALL_TARBALL is written on stdout, so init can tell what to do. */
+static volatile int g_install = -1;
 static volatile int g_set_default = 0;
 static struct entry *g_entries;
 
@@ -852,35 +900,125 @@ static void row_click_cb(lv_event_t *e) {
     open_confirm_dialog(idx);
 }
 
-static void build_ui(struct entry *entries, int n, int timeout_secs, lv_obj_t **countdown_label_out) {
-    lv_obj_t *scr = lv_screen_active();
-    lv_obj_set_style_bg_color(scr, lv_color_hex(0x101418), 0);
-    lv_obj_set_flex_flow(scr, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_all(scr, 16, 0);
-    lv_obj_set_style_pad_row(scr, 10, 0);
+static lv_obj_t *g_list;      /* the container the screens rebuild */
+static lv_obj_t *g_header;
+static struct tarball *g_tarballs;
+static int g_tarball_n;
+static int g_entry_n;
 
-    lv_obj_t *header = lv_label_create(scr);
-    lv_label_set_text(header, LV_SYMBOL_POWER "  Select a kernel to boot");
-    lv_obj_set_style_text_color(header, lv_color_hex(0x8ec6ff), 0);
+static void install_confirm_cb(lv_event_t *e) {
+    g_install = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_user_data(e));
+}
 
-    if (timeout_secs > 0) {
-        lv_obj_t *cd = lv_label_create(scr);
-        lv_obj_set_style_text_color(cd, lv_color_hex(0x808a94), 0);
-        *countdown_label_out = cd;
-    } else {
-        *countdown_label_out = NULL;
-    }
+static void install_click_cb(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
 
-    lv_obj_t *list = lv_obj_create(scr);
-    lv_obj_set_width(list, lv_pct(100));
-    lv_obj_set_flex_grow(list, 1);
-    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(list, 8, 0);
-    lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(list, 0, 0);
+    lv_obj_t *mbox = lv_msgbox_create(NULL);
+    lv_obj_set_width(mbox, lv_pct(70));
+    lv_obj_set_user_data(mbox, (void *)(intptr_t)idx);
+    lv_msgbox_add_title(mbox, "Install this kernel?");
 
-    for (int i = 0; i < n; i++) {
-        lv_obj_t *btn = lv_button_create(list);
+    char body[600];
+    snprintf(body, sizeof(body),
+             "%s\n\n"
+             "Copies the kernel and modules onto the real system, then runs "
+             "depmod, update-initramfs and update-grub inside it.\n\n"
+             "This writes to the running system and takes a few minutes. "
+             "Nothing is removed - existing kernels stay bootable.",
+             g_tarballs[idx].version);
+    lv_msgbox_add_text(mbox, body);
+
+    lv_obj_t *go = lv_msgbox_add_footer_button(mbox, "Install");
+    lv_obj_t *no = lv_msgbox_add_footer_button(mbox, "Cancel");
+    lv_obj_t *footer = lv_msgbox_get_footer(mbox);
+    lv_obj_set_height(footer, LV_SIZE_CONTENT);
+    lv_obj_set_height(lv_msgbox_get_header(mbox), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(footer, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_style_pad_column(footer, DIALOG_BTN_GAP, 0);
+    lv_obj_set_style_pad_row(footer, DIALOG_BTN_GAP, 0);
+    lv_obj_set_width(go, lv_pct(DIALOG_BTN_W_PCT));
+    lv_obj_set_width(no, lv_pct(DIALOG_BTN_W_PCT));
+    lv_obj_set_height(go, DIALOG_BTN_H);
+    lv_obj_set_height(no, DIALOG_BTN_H);
+    lv_obj_set_style_bg_color(go, lv_color_hex(0x3d7ee8), 0);
+    lv_obj_set_style_bg_opa(go, LV_OPA_30, 0);
+
+    lv_obj_add_event_cb(go, install_confirm_cb, LV_EVENT_CLICKED, mbox);
+    lv_obj_add_event_cb(no, cancel_cb, LV_EVENT_CLICKED, mbox);
+    screenshot_soon("install-dialog");
+}
+
+/* ---------------- screens ----------------
+ *
+ * Three screens share one scrollable container, rebuilt in place rather
+ * than using separate lv_screen objects: the dialogs live on
+ * lv_layer_top() and the countdown label has to survive navigation, so
+ * swapping screens underneath them would mean re-parenting both. The
+ * list is the only part that actually changes.
+ *
+ * The countdown only runs on the main menu. Navigating anywhere
+ * requires a tap, and the first tap cancels the countdown for good, so
+ * this needs no special handling - you cannot be auto-booted out from
+ * under a submenu you are reading. */
+static void show_main_menu(void);
+static void show_kernel_list(void);
+static void show_install_list(void);
+
+static lv_obj_t *make_row_h(const char *icon, const char *text, int dimmed, int h) {
+    lv_obj_t *btn = lv_button_create(g_list);
+    lv_obj_set_width(btn, lv_pct(100));
+    lv_obj_set_height(btn, h);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(dimmed ? 0x161d26 : 0x1c2530), 0);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x2a3a4d), LV_STATE_PRESSED);
+    lv_obj_set_style_radius(btn, 10, 0);
+
+    lv_obj_t *label = lv_label_create(btn);
+    lv_label_set_text_fmt(label, "%s  %s", icon, text);
+    lv_obj_set_style_text_color(label, lv_color_hex(dimmed ? 0x93a0aa : 0xe8eef4), 0);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(label, lv_pct(100));
+    lv_obj_align(label, LV_ALIGN_LEFT_MID, 16, 0);
+    return btn;
+}
+
+static lv_obj_t *make_row(const char *icon, const char *text, int dimmed) {
+    return make_row_h(icon, text, dimmed, ROW_H);
+}
+
+static void nav_cb(lv_event_t *e) {
+    void (*fn)(void) = (void (*)(void))lv_event_get_user_data(e);
+    fn();
+}
+
+static void add_back_row(void (*target)(void)) {
+    lv_obj_t *b = make_row(LV_SYMBOL_LEFT, "Back", 1);
+    lv_obj_add_event_cb(b, nav_cb, LV_EVENT_CLICKED, (void *)target);
+}
+
+static void show_main_menu(void) {
+    lv_obj_clean(g_list);
+    lv_label_set_text(g_header, LV_SYMBOL_POWER "  Boot picker");
+
+    char buf[96];
+    snprintf(buf, sizeof(buf), "Boot a kernel   (%d installed)", g_entry_n);
+    lv_obj_t *b = make_row_h(LV_SYMBOL_USB, buf, 0, MENU_ROW_H);
+    lv_obj_add_event_cb(b, nav_cb, LV_EVENT_CLICKED, (void *)show_kernel_list);
+
+    if (g_tarball_n > 0)
+        snprintf(buf, sizeof(buf), "Install a kernel   (%d available)", g_tarball_n);
+    else
+        snprintf(buf, sizeof(buf), "Install a kernel   (none found)");
+    b = make_row_h(LV_SYMBOL_DOWNLOAD, buf, g_tarball_n == 0, MENU_ROW_H);
+    lv_obj_add_event_cb(b, nav_cb, LV_EVENT_CLICKED, (void *)show_install_list);
+}
+
+static void show_kernel_list(void) {
+    lv_obj_clean(g_list);
+    lv_label_set_text(g_header, LV_SYMBOL_USB "  Select a kernel to boot");
+    add_back_row(show_main_menu);
+
+    for (int i = 0; i < g_entry_n; i++) {
+        lv_obj_t *btn = lv_button_create(g_list);
         lv_obj_set_width(btn, lv_pct(100));
         lv_obj_set_height(btn, ROW_H);
         lv_obj_set_style_bg_color(btn, lv_color_hex(0x1c2530), 0);
@@ -892,21 +1030,73 @@ static void build_ui(struct entry *entries, int n, int timeout_secs, lv_obj_t **
          * the title label gets ellipsis-truncated and a reserved
          * right margin instead of being centered over the whole row. */
         lv_obj_t *label = lv_label_create(btn);
-        lv_label_set_text_fmt(label, LV_SYMBOL_USB "  %s", entries[i].title);
+        lv_label_set_text_fmt(label, LV_SYMBOL_USB "  %s", g_entries[i].title);
         lv_obj_set_style_text_color(label, lv_color_hex(0xe8eef4), 0);
         lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-        lv_obj_set_width(label, lv_pct(entries[i].is_default ? 82 : 100));
+        lv_obj_set_width(label, lv_pct(g_entries[i].is_default ? 82 : 100));
         lv_obj_align(label, LV_ALIGN_LEFT_MID, 16, 0);
 
-        if (entries[i].is_default) {
+        if (g_entries[i].is_default) {
             lv_obj_t *mark = lv_label_create(btn);
             lv_label_set_text(mark, LV_SYMBOL_OK);
             lv_obj_set_style_text_color(mark, lv_color_hex(0x8ec6ff), 0);
             lv_obj_align(mark, LV_ALIGN_RIGHT_MID, -16, 0);
         }
-
         lv_obj_add_event_cb(btn, row_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
     }
+}
+
+static void show_install_list(void) {
+    lv_obj_clean(g_list);
+    lv_label_set_text(g_header, LV_SYMBOL_DOWNLOAD "  Install a kernel");
+    add_back_row(show_main_menu);
+
+    if (g_tarball_n == 0) {
+        lv_obj_t *l = lv_label_create(g_list);
+        lv_label_set_text(l, "No kernel tarballs found.\n\n"
+                             "Put a *-installer.tar.gz under /home or /root\n"
+                             "on the real system and reopen this menu.");
+        lv_obj_set_style_text_color(l, lv_color_hex(0x93a0aa), 0);
+        return;
+    }
+    for (int i = 0; i < g_tarball_n; i++) {
+        char row[220];
+        snprintf(row, sizeof(row), "%s   (%s)", g_tarballs[i].version, g_tarballs[i].size);
+        lv_obj_t *b = make_row(LV_SYMBOL_DOWNLOAD, row, 0);
+        lv_obj_add_event_cb(b, install_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+    }
+}
+
+static void build_ui(struct entry *entries, int n, int timeout_secs, lv_obj_t **countdown_label_out) {
+    g_entries = entries;
+    g_entry_n = n;
+
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x101418), 0);
+    lv_obj_set_flex_flow(scr, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(scr, 16, 0);
+    lv_obj_set_style_pad_row(scr, 10, 0);
+
+    g_header = lv_label_create(scr);
+    lv_obj_set_style_text_color(g_header, lv_color_hex(0x8ec6ff), 0);
+
+    if (timeout_secs > 0) {
+        lv_obj_t *cd = lv_label_create(scr);
+        lv_obj_set_style_text_color(cd, lv_color_hex(0x808a94), 0);
+        *countdown_label_out = cd;
+    } else {
+        *countdown_label_out = NULL;
+    }
+
+    g_list = lv_obj_create(scr);
+    lv_obj_set_width(g_list, lv_pct(100));
+    lv_obj_set_flex_grow(g_list, 1);
+    lv_obj_set_flex_flow(g_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(g_list, 8, 0);
+    lv_obj_set_style_bg_opa(g_list, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(g_list, 0, 0);
+
+    show_main_menu();
 }
 
 static void lvgl_log_to_stderr(lv_log_level_t level, const char *buf) {
@@ -960,7 +1150,7 @@ static int wait_for_device(const char *what, struct drm_dev *drm, struct touch_d
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <menu.tsv>\n", argv[0]);
+        fprintf(stderr, "usage: %s <menu.tsv> [tarballs.tsv]\n", argv[0]);
         return 2;
     }
 
@@ -975,6 +1165,14 @@ int main(int argc, char **argv) {
         return 1;
     }
     g_entries = entries;
+
+    /* Optional second argument. Absent or unreadable just means the
+     * Install menu comes up empty - never a reason to refuse to boot. */
+    static struct tarball tarballs[64];
+    if (argc > 2) {
+        g_tarball_n = load_tarballs(argv[2], tarballs, 64);
+        g_tarballs = tarballs;
+    }
 
     /* Booted from the initramfs we are in a footrace with driver probe:
      * init reaches this point within ~0.85s of the kernel starting
@@ -1134,7 +1332,7 @@ int main(int argc, char **argv) {
                 }
             }
         }
-        if (g_selected >= 0) break;
+        if (g_selected >= 0 || g_install >= 0) break;
 
         if (fds[touch_idx].revents & POLLIN) {
             struct input_event ev;
@@ -1173,6 +1371,10 @@ int main(int argc, char **argv) {
                     if (new_down && timer_fd >= 0 && !countdown_cancelled) {
                         /* first touch: cancel the auto-boot countdown */
                         countdown_cancelled = 1;
+                        /* "Booting default in 30s - tap to choose" is
+                         * false the moment you have tapped, and it
+                         * follows you into every submenu. */
+                        if (countdown_label) lv_obj_add_flag(countdown_label, LV_OBJ_FLAG_HIDDEN);
                         struct itimerspec off = {0};
                         timerfd_settime(timer_fd, 0, &off, NULL);
                         if (countdown_label) lv_label_set_text(countdown_label, "");
@@ -1201,6 +1403,16 @@ int main(int argc, char **argv) {
     if (vt_fd >= 0) close(vt_fd);
     drm_close(&drm);
     free(lvgl_buf);
+
+    if (g_install >= 0) {
+        /* Distinct from the SELECTED_* contract on purpose: init has to
+         * do something completely different with this, and a caller
+         * that only knows about SELECTED_LINUX will find nothing to
+         * source rather than silently booting the wrong thing. */
+        shell_quote(stdout, "INSTALL_TARBALL", g_tarballs[g_install].path);
+        fprintf(stderr, "picker: install requested: %s\n", g_tarballs[g_install].path);
+        return 0;
+    }
 
     if (g_selected < 0) {
         fprintf(stderr, "picker: touch input ended with no selection\n");

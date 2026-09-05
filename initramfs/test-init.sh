@@ -92,6 +92,12 @@ printf 'Ubuntu\t/boot/vmlinuz-real\t/boot/initrd.img-real\tro quiet\t\n'
 printf 'Ubuntu old\t/boot/vmlinuz-old\t/boot/initrd.img-old\tro quiet\t\n'
 EOF
   printf '#!/bin/sh\ncat "$1"\n' > "$SB/bin/apply-default.sh"
+  printf '#!/bin/sh\nprintf "%s\\tv1\\t120M\\n" /home/bob/k-installer.tar.gz\n' > "$SB/bin/discover-tarballs.sh"
+  cat > "$SB/bin/install-kernel.sh" <<EOF
+#!/bin/sh
+echo "MARKER_INSTALL_RAN \$2" >&2
+exit ${INSTALL_RC:-0}
+EOF
   case "$2" in
     ok)    cat > "$SB/bin/picker" <<'EOF'
 #!/bin/sh
@@ -105,6 +111,31 @@ EOF
     ;;
     crash) printf '#!/bin/sh\necho "picker mock: MARKER_DRM_OPEN_FAILED /dev/dri/card0" >&2\nexit 3\n' > "$SB/bin/picker" ;;
     empty) printf '#!/bin/sh\necho "picker mock: chose nothing" >&2\nexit 0\n' > "$SB/bin/picker" ;;
+    install) cat > "$SB/bin/picker" <<'EOF'
+#!/bin/sh
+# First run asks for an install; later runs boot. Models the real flow,
+# where installing returns to the menu instead of booting.
+n=$(cat /tmp/pickruns 2>/dev/null || echo 0); n=$((n+1)); echo $n > /tmp/pickruns
+if [ "$n" = 1 ]; then
+  echo "MARKER_PICKER_RUN_$n" >&2
+  echo "INSTALL_TARBALL=/home/bob/k-installer.tar.gz"
+else
+  echo "MARKER_PICKER_RUN_$n" >&2
+  echo 'SELECTED_LINUX=/boot/vmlinuz-chosen'
+  echo 'SELECTED_INITRD=/boot/initrd.img-chosen'
+  echo 'SELECTED_CMDLINE=ro quiet'
+fi
+exit 0
+EOF
+    ;;
+    installfail) cat > "$SB/bin/picker" <<'EOF'
+#!/bin/sh
+n=$(cat /tmp/pickruns 2>/dev/null || echo 0); n=$((n+1)); echo $n > /tmp/pickruns
+if [ "$n" = 1 ]; then echo "INSTALL_TARBALL=/home/bob/k-installer.tar.gz"
+else echo 'SELECTED_LINUX=/boot/vmlinuz-chosen'; echo 'SELECTED_INITRD=x'; echo 'SELECTED_CMDLINE=y'; fi
+exit 0
+EOF
+    ;;
   esac
   chmod +x "$SB"/bin/* "$SB"/sbin/*
 
@@ -151,6 +182,7 @@ run() {
   PATH="$_path" \
   REAL_ROOT_DEV="$SB/dev/rootdev" PICKER_FALLBACK_PAUSE=0 \
   PICKER_WAIT_ROOT=${W:-3} PICKER_WAIT_DRM=${W:-3} PICKER_WAIT_INPUT=${W:-3} \
+  PICKER_INSTALL_PAUSE=0 \
     ${TEST_SH:-/bin/sh} "$SB/init" >"$SB/out" 2>"$SB/err"
 }
 
@@ -208,6 +240,21 @@ log  | grep -q "TIMEOUT: root device"        && bad "log unreachable when root n
 both | grep -q "TIMEOUT: root device"        && ok "reports the timeout on screen" || bad "timeout not reported"
 both | grep -q "MARKER_RESCUE_SHELL_REACHED" && ok "drops to rescue rather than hanging" || bad "did not reach rescue"
 both | grep -q "MARKER_KEXEC"                && bad "kexec'd with no root!" || ok "does not kexec"
+
+echo "=== 8. Install: picker asks to install, then boots ==="
+rm -f /tmp/pickruns; setup inst install 0 0; run
+both | grep -q "MARKER_INSTALL_RAN /home/bob/k-installer.tar.gz" && ok "runs install-kernel.sh with the chosen tarball" || bad "install-kernel.sh not run"
+log  | grep -q "MARKER_PICKER_RUN_2"        && ok "returns to the menu instead of booting straight away" || bad "did not re-show the menu"
+both | grep -q "MARKER_KEXEC.*vmlinuz-chosen" && ok "boots what was picked on the second pass" || bad "did not boot after install"
+log  | grep -q "install succeeded"          && ok "log records the install" || bad "install not in the log"
+
+echo "=== 9. Install fails: must still boot, nothing stranded ==="
+rm -f /tmp/pickruns; INSTALL_RC=1 setup instfail installfail 0 0; INSTALL_RC=1 run
+both | grep -q "install FAILED"             && ok "says so on screen" || bad "silent about the failure"
+both | grep -q "MARKER_KEXEC"               && ok "still boots afterwards" || bad "failed install left it unable to boot"
+both | grep -q "MARKER_RESCUE"              && bad "dropped to rescue over a failed install" || ok "does not drop to rescue"
+log  | grep -q "INSTALL FAILED"             && ok "log records the failure" || bad "failure not in the log"
+log  | grep -q "MARKER_INSTALL_RAN"          && ok "log captures the install output, not just that it failed" || bad "install output missing from the log"
 
 echo
 echo "passed: $pass   failed: $fail  (${MODE_NAME:-dash + coreutils})"

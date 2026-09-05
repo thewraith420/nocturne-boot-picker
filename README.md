@@ -49,28 +49,43 @@ GRUB  →  picker kernel  →  init (PID 1)  →  mount real root (ro)
       →  kexec into the chosen kernel
 ```
 
-Tapping a row opens a confirm dialog with four actions: **Boot**, **Cancel**,
-**Edit** (change this boot's kernel command line via an on-screen keyboard,
-one-time, not persisted) and **Set Default** (persist this kernel as the
-first entry for future boots).
+The menu opens on two choices: **Boot a kernel**, which lists everything
+found in `grub.cfg`, and **Install a kernel**, which lists kernel tarballs
+found on the real system.
 
-If nothing is tapped within `PICKER_TIMEOUT_SECS` (default 10) it boots the
+Tapping a kernel opens a confirm dialog with four actions: **Boot**,
+**Cancel**, **Edit** (change this boot's kernel command line via an on-screen
+keyboard, one-time, not persisted) and **Set Default** (persist this kernel as
+the first entry for future boots).
+
+**Installing** unpacks the tarball onto the real system and then runs
+`depmod`, `update-initramfs` and `update-grub` *inside it* via chroot — the
+system's own tools, against its own configuration. Doing it from here means
+the root filesystem is not in use: no package manager holding locks, no
+running kernel having its modules replaced underneath it. It is additive, so
+every currently-bootable kernel stays bootable, and it returns you to the menu
+with the new kernel listed rather than booting straight into it.
+
+If nothing is tapped within `PICKER_TIMEOUT_SECS` (default 30) it boots the
 first entry, exactly like GRUB's own timeout. That matters on a keyboardless
 device: it is the reason a broken touchscreen cannot strand you.
 
 ### Screenshots
 
-<img src="docs/screenshots/01-menu.png" width="31%"> <img src="docs/screenshots/02-confirm-dialog.png" width="31%"> <img src="docs/screenshots/03-edit-dialog.png" width="31%">
+<img src="docs/screenshots/01-menu.png" width="31%"> <img src="docs/screenshots/02-kernel-list.png" width="31%"> <img src="docs/screenshots/03-install-list.png" width="31%">
 
-*The kernel list (checkmarks mark the saved default), the confirm dialog, and
-Edit's on-screen keyboard with the full command line wrapped for reading.*
+<img src="docs/screenshots/04-confirm-dialog.png" width="31%"> <img src="docs/screenshots/05-edit-dialog.png" width="31%">
 
-These are real renders of the current code, not mockups: `ui/render-screens.c`
-includes `picker.c` and calls the same `build_ui()` / `open_confirm_dialog()`
-/ Edit handler the device runs, through picker's own flush and screenshot
-paths, with a memory buffer standing in for the DRM scanout mapping. So they
-show exactly what the panel shows, at full 2000x3000, and they stay current
-by being regenerated rather than re-photographed:
+*Top: the main menu, the installed-kernel list (checkmarks mark the saved
+default), and kernel tarballs found on the real system. Bottom: the confirm
+dialog and Edit's on-screen keyboard with the full command line wrapped.*
+
+These are real renders of the current code, not mockups:
+`ui/render-screens.c` includes `picker.c` and calls the same `build_ui()` /
+`show_kernel_list()` / `open_confirm_dialog()` / Edit handler the device
+runs, through picker's own flush and screenshot paths, with a memory buffer
+standing in for the DRM scanout mapping. So they show exactly what the panel
+shows, and stay current by being regenerated rather than re-photographed:
 
 ```sh
 cd ui && make render-screens
@@ -82,8 +97,8 @@ And the same thing on the actual hardware, unretouched:
 <img src="docs/screenshots/on-hardware-confirm.jpg" width="31%"> <img src="docs/screenshots/on-hardware-edit.jpg" width="31%">
 
 *Phone photos from the night the whole boot chain first worked end to end.
-The confirm dialog here predates the button-spacing fix, so its buttons sit
-edge-to-edge — compare the render above.*
+These predate the menu restructure and the button-spacing fix, so the flat
+kernel list and edge-to-edge buttons are how it looked then.*
 
 `picker` can also capture itself on the device
 (`PICKER_SCREENSHOT_DIR=/path ./picker menu.tsv`), correctly un-rotated
@@ -153,7 +168,7 @@ exactly that ambiguity.
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `PICKER_ROTATE` | `270` (set by `init`) | Panel rotation: 0/90/180/270 |
-| `PICKER_TIMEOUT_SECS` | `10` | Auto-boot the first entry; `0` disables |
+| `PICKER_TIMEOUT_SECS` | `30` | Auto-boot the first entry; `0` disables |
 | `PICKER_WAIT_SECS` | `20` | How long `picker` waits for DRM and touch |
 | `PICKER_WAIT_ROOT` | `15` | How long `init` waits for the root device |
 | `PICKER_FALLBACK_PAUSE` | `8` | On-screen hold before a fallback kexec |

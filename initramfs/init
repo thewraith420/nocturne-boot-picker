@@ -135,6 +135,11 @@ save_log() {
         echo "--- /sys/bus/i2c/devices ---"
         ls /sys/bus/i2c/devices 2>&1 || true
         echo
+        if [ -s /run/picker/install.log ]; then
+            echo "--- kernel install output ---"
+            cat /run/picker/install.log 2>/dev/null
+            echo
+        fi
         echo "--- picker exit code: ${picker_rc:-n/a} ---"
         echo "--- picker stderr ---"
         cat /run/picker/picker.stderr 2>/dev/null || echo "(none captured)"
@@ -237,12 +242,73 @@ export PICKER_ROTATE
 # definition of the thing, and it disagreed with the real one. Only
 # touch_open() knows what a usable touch device is, so only picker can
 # usefully wait for one.
+# Installable tarballs for the Install menu. Entirely optional: a
+# failure here just means that menu comes up empty, which must never be
+# a reason not to boot.
+/bin/discover-tarballs.sh /mnt/root > /run/picker/tarballs.tsv 2>/dev/null || \
+    : > /run/picker/tarballs.tsv
+
+# Installing a kernel returns to the menu rather than booting, so the
+# newly installed entry can be picked immediately - update-grub has
+# already rewritten grub.cfg by then, so re-running discovery is what
+# makes it appear. Bounded, because an install that somehow kept
+# re-requesting itself must not become a boot loop: after this many
+# rounds we stop offering and just boot something.
+install_rounds=0
+while :; do
 stage "running picker"
-if /bin/picker /run/picker/menu.tsv > /run/picker/selected 2>/run/picker/picker.stderr; then
+if /bin/picker /run/picker/menu.tsv /run/picker/tarballs.tsv > /run/picker/selected 2>/run/picker/picker.stderr; then
     picker_rc=0
-    # Sets SELECTED_LINUX, SELECTED_INITRD, SELECTED_CMDLINE, and
-    # SET_DEFAULT=1 if "Set Default" was used.
+    # Sets SELECTED_LINUX/INITRD/CMDLINE and SELECTED_BY, or SET_DEFAULT=1
+    # if "Set Default" was used, or INSTALL_TARBALL if the user chose to
+    # install instead of boot. Exactly one of the last two.
+    INSTALL_TARBALL=
     . /run/picker/selected
+
+    if [ -n "$INSTALL_TARBALL" ]; then
+        install_rounds=$((install_rounds + 1))
+        if [ "$install_rounds" -gt 3 ]; then
+            stage "too many install rounds - booting instead"
+        else
+            stage "installing $INSTALL_TARBALL"
+            echo "" >&2
+            echo "picker: installing a kernel - this takes several minutes." >&2
+            echo "picker: do NOT power off." >&2
+            # Captured as well as shown: on the console it scrolls past
+            # behind the reboot, and "the install failed" without the
+            # reason is exactly the blind spot the boot log exists to
+            # close. tee keeps both - but a pipeline reports the exit
+            # status of its LAST command, so tee's success would mask an
+            # install failure entirely (it did, until a test caught it).
+            # busybox ash has no PIPESTATUS, so the status comes back
+            # through a file instead of being inferred.
+            { /bin/install-kernel.sh /mnt/root "$INSTALL_TARBALL" 2>&1; \
+              echo $? > /run/picker/install.rc; } \
+              | tee -a /run/picker/install.log >&2
+            if [ "$(cat /run/picker/install.rc 2>/dev/null || echo 1)" = 0 ]; then
+                stage "install succeeded"
+                echo "picker: install finished - returning to the menu." >&2
+            else
+                stage "INSTALL FAILED for $INSTALL_TARBALL"
+                echo "picker: install FAILED - see the message above." >&2
+                echo "picker: nothing was removed; existing kernels still boot." >&2
+            fi
+            sleep "${PICKER_INSTALL_PAUSE:-6}"
+
+            # grub.cfg has changed, so rebuild the menu from it rather
+            # than showing a stale list that omits what was just added.
+            if /bin/discover-kernels.sh /mnt/root/boot/grub/grub.cfg > /run/picker/menu.tsv.raw \
+               && [ -s /run/picker/menu.tsv.raw ]; then
+                /bin/apply-default.sh /run/picker/menu.tsv.raw "$DEFAULT_MARKER" > /run/picker/menu.tsv
+                default_line=$(head -n1 /run/picker/menu.tsv)
+                default_linux=$(printf '%s' "$default_line" | cut -f2)
+                default_initrd=$(printf '%s' "$default_line" | cut -f3)
+                default_cmdline=$(printf '%s' "$default_line" | cut -f4)
+            fi
+            /bin/discover-tarballs.sh /mnt/root > /run/picker/tarballs.tsv 2>/dev/null || :
+            continue
+        fi
+    fi
 else
     picker_rc=$?
     picker_failed="picker exited $picker_rc"
@@ -250,6 +316,8 @@ else
     SELECTED_INITRD="$default_initrd"
     SELECTED_CMDLINE="$default_cmdline"
 fi
+break
+done
 
 if [ -z "$SELECTED_LINUX" ]; then
     picker_failed="${picker_failed:-picker produced no selection}"
