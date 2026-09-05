@@ -91,6 +91,18 @@ int main(int argc, char **argv) {
     lv_refr_now(disp);
     screenshot("install-list");
 
+    /* The progress screen, with a plausible run of real output. */
+    show_install_progress("7.2.3-pixel-slate");
+    prog_append("install-kernel: reading /home/bob/buildstuff/BobZKernel-7.2.3-pixel-slate-installer.tar.gz");
+    prog_append("install-kernel: kernel release: 7.2.3-BobZKernel-pixel-slate");
+    prog_append("install-kernel: remounting /mnt/root read-write");
+    prog_append("install-kernel: extracting kernel and modules (this takes a moment)");
+    prog_append("install-kernel: preparing chroot");
+    prog_append("install-kernel: depmod 7.2.3-BobZKernel-pixel-slate");
+    prog_append("install-kernel: update-initramfs -c -k 7.2.3-BobZKernel-pixel-slate (slow - do not power off)");
+    lv_refr_now(disp);
+    screenshot("install-progress");
+
     show_kernel_list();
     lv_refr_now(disp);
     /* The real confirm dialog, opened by the real function. */

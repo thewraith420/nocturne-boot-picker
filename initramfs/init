@@ -248,6 +248,21 @@ export PICKER_ROTATE
 /bin/discover-tarballs.sh /mnt/root > /run/picker/tarballs.tsv 2>/dev/null || \
     : > /run/picker/tarballs.tsv
 
+# grub.cfg changes when a kernel is installed, so the menu has to be
+# rebuilt from it - otherwise the list still omits what was just added,
+# which looks exactly like the install having done nothing.
+refresh_menu() {
+    if /bin/discover-kernels.sh /mnt/root/boot/grub/grub.cfg > /run/picker/menu.tsv.raw \
+       && [ -s /run/picker/menu.tsv.raw ]; then
+        /bin/apply-default.sh /run/picker/menu.tsv.raw "$DEFAULT_MARKER" > /run/picker/menu.tsv
+        default_line=$(head -n1 /run/picker/menu.tsv)
+        default_linux=$(printf '%s' "$default_line" | cut -f2)
+        default_initrd=$(printf '%s' "$default_line" | cut -f3)
+        default_cmdline=$(printf '%s' "$default_line" | cut -f4)
+    fi
+    /bin/discover-tarballs.sh /mnt/root > /run/picker/tarballs.tsv 2>/dev/null || :
+}
+
 # Installing a kernel returns to the menu rather than booting, so the
 # newly installed entry can be picked immediately - update-grub has
 # already rewritten grub.cfg by then, so re-running discovery is what
@@ -263,7 +278,22 @@ if /bin/picker /run/picker/menu.tsv /run/picker/tarballs.tsv > /run/picker/selec
     # if "Set Default" was used, or INSTALL_TARBALL if the user chose to
     # install instead of boot. Exactly one of the last two.
     INSTALL_TARBALL=
+    RELOAD=
     . /run/picker/selected
+
+    # picker ran the install itself and showed its progress, so there is
+    # nothing to install here - only a stale kernel list to refresh.
+    # Deliberately a different key from INSTALL_TARBALL: treating them
+    # the same would install the same tarball a second time.
+    if [ -n "$RELOAD" ]; then
+        install_rounds=$((install_rounds + 1))
+        if [ "$install_rounds" -le 3 ]; then
+            stage "reloading the menu after an in-picker install"
+            refresh_menu
+            continue
+        fi
+        stage "too many reloads - booting instead"
+    fi
 
     if [ -n "$INSTALL_TARBALL" ]; then
         install_rounds=$((install_rounds + 1))
@@ -295,17 +325,7 @@ if /bin/picker /run/picker/menu.tsv /run/picker/tarballs.tsv > /run/picker/selec
             fi
             sleep "${PICKER_INSTALL_PAUSE:-6}"
 
-            # grub.cfg has changed, so rebuild the menu from it rather
-            # than showing a stale list that omits what was just added.
-            if /bin/discover-kernels.sh /mnt/root/boot/grub/grub.cfg > /run/picker/menu.tsv.raw \
-               && [ -s /run/picker/menu.tsv.raw ]; then
-                /bin/apply-default.sh /run/picker/menu.tsv.raw "$DEFAULT_MARKER" > /run/picker/menu.tsv
-                default_line=$(head -n1 /run/picker/menu.tsv)
-                default_linux=$(printf '%s' "$default_line" | cut -f2)
-                default_initrd=$(printf '%s' "$default_line" | cut -f3)
-                default_cmdline=$(printf '%s' "$default_line" | cut -f4)
-            fi
-            /bin/discover-tarballs.sh /mnt/root > /run/picker/tarballs.tsv 2>/dev/null || :
+            refresh_menu
             continue
         fi
     fi

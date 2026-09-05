@@ -24,7 +24,7 @@ check-lvgl:
 # make cannot see on its own - without this they silently keep testing
 # and rendering whatever picker.c looked like when they were last built,
 # which is the "green suite proving nothing" failure in its purest form.
-test-edit-layout.o test-screenshot.o test-flush.o render-screens.o: picker.c
+test-edit-layout.o test-screenshot.o test-flush.o test-install.o render-screens.o: picker.c
 
 # Headless regression test for the Edit dialog's z-order - the keyboard
 # rendered fine and was dead to touch because it sat under the msgbox
@@ -47,15 +47,19 @@ render-screens: check-lvgl render-screens.o $(LVGL_OBJ)
 test-flush: check-lvgl test-flush.o $(LVGL_OBJ)
 	$(CC) $(CFLAGS) -o $@ test-flush.o $(LVGL_OBJ) $(LDLIBS)
 
-test: test-edit-layout test-screenshot test-flush
+test-install: check-lvgl test-install.o $(LVGL_OBJ)
+	$(CC) $(CFLAGS) -o $@ test-install.o $(LVGL_OBJ) $(LDLIBS)
+
+test: test-edit-layout test-screenshot test-flush test-install
 	./test-edit-layout
 	./test-screenshot
 	./test-flush
+	./test-install
 
 clean:
 	rm -f picker picker.o test-edit-layout test-edit-layout.o \
 	      test-screenshot test-screenshot.o \
 	      render-screens render-screens.o \
-	      test-flush test-flush.o $(LVGL_OBJ)
+	      test-flush test-flush.o test-install test-install.o $(LVGL_OBJ)
 
 .PHONY: clean check-lvgl test

@@ -25,3 +25,4 @@ ui/*.ppm
 ui/*.png
 ui/render-screens
 ui/test-flush
+ui/test-install

@@ -48,6 +48,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/signalfd.h>
+#include <sys/wait.h>
 #include <sys/timerfd.h>
 #include <time.h>
 #include <unistd.h>
@@ -906,8 +907,148 @@ static struct tarball *g_tarballs;
 static int g_tarball_n;
 static int g_entry_n;
 
+/* ---------------- install progress ----------------
+ *
+ * The install runs as a CHILD of picker rather than after it exits, so
+ * the UI survives to report on it. Previously picker exited the moment
+ * you confirmed, tearing down DRM, and the only feedback for several
+ * minutes was console text behind a restored framebuffer - which looks
+ * a lot like a hang on a machine you have just been told not to power
+ * off.
+ *
+ * If the install script is not executable - hand-running picker from a
+ * VT, say - none of this engages and picker falls back to writing
+ * INSTALL_TARBALL for init to act on, exactly as before. */
+static int   g_install_fd  = -1;      /* read end of the child's output */
+static pid_t g_install_pid = -1;
+static int   g_reload = 0;            /* finished: ask init to re-scan */
+static lv_obj_t *g_prog_status;
+static lv_obj_t *g_prog_log;
+static lv_obj_t *g_prog_spinner;
+static lv_obj_t *g_countdown;         /* so the install can silence it */
+/* Hard interlock: nothing may auto-boot while an install is running.
+ * In practice the countdown is already cancelled - reaching the install
+ * screen takes several taps and the first one kills it - but "in
+ * practice" is not what you want standing between update-initramfs and
+ * a kexec. A timeout firing mid-install would cut the initramfs write
+ * in half. */
+static volatile int g_installing;
+static char  g_prog_lines[8][160];    /* rolling tail of the output */
+static int   g_prog_n;
+
+static const char *install_script(void) {
+    const char *s = getenv("PICKER_INSTALL_SH");
+    return s ? s : "/bin/install-kernel.sh";
+}
+
+static void prog_done_cb(lv_event_t *e) { (void)e; g_reload = 1; }
+
+static void prog_append(const char *line) {
+    if (!*line) return;
+    if (g_prog_n < 8) {
+        snprintf(g_prog_lines[g_prog_n++], sizeof(g_prog_lines[0]), "%s", line);
+    } else {
+        for (int i = 1; i < 8; i++)
+            memcpy(g_prog_lines[i - 1], g_prog_lines[i], sizeof(g_prog_lines[0]));
+        snprintf(g_prog_lines[7], sizeof(g_prog_lines[0]), "%s", line);
+    }
+    if (g_prog_status) lv_label_set_text(g_prog_status, line);
+    if (g_prog_log) {
+        char all[8 * 160];
+        size_t used = 0;
+        for (int i = 0; i < g_prog_n && used < sizeof(all) - 1; i++)
+            used += (size_t)snprintf(all + used, sizeof(all) - used, "%s\n", g_prog_lines[i]);
+        lv_label_set_text(g_prog_log, all);
+    }
+}
+
+static void show_install_progress(const char *version) {
+    lv_obj_clean(g_list);
+    g_prog_n = 0;
+    g_installing = 1;
+    if (g_countdown) lv_obj_add_flag(g_countdown, LV_OBJ_FLAG_HIDDEN);
+    lv_label_set_text(g_header, LV_SYMBOL_DOWNLOAD "  Installing");
+
+    lv_obj_t *title = lv_label_create(g_list);
+    lv_label_set_text(title, version);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xe8eef4), 0);
+
+    g_prog_spinner = lv_spinner_create(g_list);
+    lv_obj_set_size(g_prog_spinner, 160, 160);
+
+    g_prog_status = lv_label_create(g_list);
+    lv_label_set_text(g_prog_status, "starting...");
+    lv_obj_set_style_text_color(g_prog_status, lv_color_hex(0x8ec6ff), 0);
+    lv_label_set_long_mode(g_prog_status, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(g_prog_status, lv_pct(100));
+
+    lv_obj_t *warn = lv_label_create(g_list);
+    lv_label_set_text(warn, "This takes several minutes. Do not power off.");
+    lv_obj_set_style_text_color(warn, lv_color_hex(0x93a0aa), 0);
+
+    g_prog_log = lv_label_create(g_list);
+    lv_label_set_text(g_prog_log, "");
+    lv_obj_set_style_text_color(g_prog_log, lv_color_hex(0x6f7b86), 0);
+    lv_label_set_long_mode(g_prog_log, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(g_prog_log, lv_pct(100));
+}
+
+static void install_finished(int ok) {
+    if (g_prog_spinner) { lv_obj_delete(g_prog_spinner); g_prog_spinner = NULL; }
+    lv_label_set_text(g_header, ok ? LV_SYMBOL_OK "  Install finished"
+                                   : LV_SYMBOL_WARNING "  Install failed");
+    if (g_prog_status) {
+        lv_label_set_text(g_prog_status, ok
+            ? "Installed. It will appear in the kernel list."
+            : "Failed - nothing was removed, existing kernels still boot.");
+        lv_obj_set_style_text_color(g_prog_status,
+                                    lv_color_hex(ok ? 0x8ec6ff : 0xffb4a2), 0);
+    }
+    lv_obj_t *done = lv_button_create(g_list);
+    lv_obj_set_width(done, lv_pct(100));
+    lv_obj_set_height(done, DIALOG_BTN_H);
+    lv_obj_set_style_bg_color(done, lv_color_hex(0x3d7ee8), 0);
+    lv_obj_set_style_bg_opa(done, LV_OPA_30, 0);
+    lv_obj_t *l = lv_label_create(done);
+    lv_label_set_text(l, "Back to menu");
+    lv_obj_center(l);
+    lv_obj_add_event_cb(done, prog_done_cb, LV_EVENT_CLICKED, NULL);
+    screenshot_soon(ok ? "install-done" : "install-failed");
+}
+
+/* 0: child started, the UI takes over. -1: fall back to exiting and
+ * letting init run the install. */
+static int start_install(int idx) {
+    const char *script = install_script();
+    if (access(script, X_OK) != 0) return -1;
+
+    int pfd[2];
+    if (pipe(pfd) != 0) return -1;
+
+    pid_t pid = fork();
+    if (pid < 0) { close(pfd[0]); close(pfd[1]); return -1; }
+    if (pid == 0) {
+        close(pfd[0]);
+        dup2(pfd[1], STDOUT_FILENO);
+        dup2(pfd[1], STDERR_FILENO);
+        close(pfd[1]);
+        const char *root = getenv("PICKER_ROOT");
+        execl(script, script, root ? root : "/mnt/root",
+              g_tarballs[idx].path, (char *)NULL);
+        _exit(127);
+    }
+    close(pfd[1]);
+    g_install_fd = pfd[0];
+    g_install_pid = pid;
+    show_install_progress(g_tarballs[idx].version);
+    return 0;
+}
+
 static void install_confirm_cb(lv_event_t *e) {
-    g_install = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_user_data(e));
+    lv_obj_t *mbox = lv_event_get_user_data(e);
+    int idx = (int)(intptr_t)lv_obj_get_user_data(mbox);
+    lv_msgbox_close_async(mbox);
+    if (start_install(idx) != 0) g_install = idx;   /* let init do it */
 }
 
 static void install_click_cb(lv_event_t *e) {
@@ -1083,6 +1224,7 @@ static void build_ui(struct entry *entries, int n, int timeout_secs, lv_obj_t **
     if (timeout_secs > 0) {
         lv_obj_t *cd = lv_label_create(scr);
         lv_obj_set_style_text_color(cd, lv_color_hex(0x808a94), 0);
+        g_countdown = cd;
         *countdown_label_out = cd;
     } else {
         *countdown_label_out = NULL;
@@ -1276,13 +1418,16 @@ int main(int argc, char **argv) {
 
     lv_timer_handler();
 
-    struct pollfd fds[3];
+    struct pollfd fds[4];
+    char inst_buf[512];
+    size_t inst_len = 0;
     while (g_selected < 0) {
         int nfds = 0;
-        int touch_idx = -1, sig_idx = -1, timer_idx = -1;
+        int touch_idx = -1, sig_idx = -1, timer_idx = -1, inst_idx = -1;
         fds[nfds].fd = touch.fd; fds[nfds].events = POLLIN; touch_idx = nfds++;
         if (sig_fd >= 0) { fds[nfds].fd = sig_fd; fds[nfds].events = POLLIN; sig_idx = nfds++; }
         if (timer_fd >= 0) { fds[nfds].fd = timer_fd; fds[nfds].events = POLLIN; timer_idx = nfds++; }
+        if (g_install_fd >= 0) { fds[nfds].fd = g_install_fd; fds[nfds].events = POLLIN; inst_idx = nfds++; }
 
         int pr = poll(fds, nfds, POLL_PERIOD_MS);
         if (pr < 0 && errno != EINTR) break;
@@ -1324,7 +1469,9 @@ int main(int argc, char **argv) {
             uint64_t ticks;
             if (read(timer_fd, &ticks, sizeof(ticks)) == (ssize_t)sizeof(ticks)) {
                 seconds_left -= (int)ticks;
-                if (seconds_left <= 0) {
+                if (g_installing) {
+                    /* see g_installing: never auto-boot mid-install */
+                } else if (seconds_left <= 0) {
                     g_selected = 0;
                     g_selected_by_timeout = 1;
                 } else if (countdown_label) {
@@ -1332,7 +1479,36 @@ int main(int argc, char **argv) {
                 }
             }
         }
-        if (g_selected >= 0 || g_install >= 0) break;
+        /* Output from the running install, line by line onto the
+         * progress screen. Partial reads are normal - the child writes
+         * whenever it feels like it - so hold the tail until a newline
+         * rather than printing fragments. */
+        if (inst_idx >= 0 && (fds[inst_idx].revents & (POLLIN | POLLHUP))) {
+            ssize_t got = read(g_install_fd, inst_buf + inst_len, sizeof(inst_buf) - inst_len - 1);
+            if (got > 0) {
+                inst_len += (size_t)got;
+                inst_buf[inst_len] = '\0';
+                char *start = inst_buf, *nl;
+                while ((nl = strchr(start, '\n'))) {
+                    *nl = '\0';
+                    prog_append(start);
+                    start = nl + 1;
+                }
+                inst_len = strlen(start);
+                memmove(inst_buf, start, inst_len + 1);
+            } else {
+                /* EOF: the child closed its output, so it is done. */
+                close(g_install_fd);
+                g_install_fd = -1;
+                if (inst_len) { inst_buf[inst_len] = '\0'; prog_append(inst_buf); inst_len = 0; }
+                int st = 0;
+                if (g_install_pid > 0) waitpid(g_install_pid, &st, 0);
+                g_install_pid = -1;
+                install_finished(WIFEXITED(st) && WEXITSTATUS(st) == 0);
+            }
+        }
+
+        if (g_selected >= 0 || g_install >= 0 || g_reload) break;
 
         if (fds[touch_idx].revents & POLLIN) {
             struct input_event ev;
@@ -1403,6 +1579,16 @@ int main(int argc, char **argv) {
     if (vt_fd >= 0) close(vt_fd);
     drm_close(&drm);
     free(lvgl_buf);
+
+    if (g_reload) {
+        /* The install already ran here, in front of the user. init only
+         * needs to re-read grub.cfg and show the menu again - it must
+         * NOT install anything a second time, which is why this is a
+         * different key from INSTALL_TARBALL. */
+        shell_quote(stdout, "RELOAD", "1");
+        fprintf(stderr, "picker: install finished, asking for a menu reload\n");
+        return 0;
+    }
 
     if (g_install >= 0) {
         /* Distinct from the SELECTED_* contract on purpose: init has to

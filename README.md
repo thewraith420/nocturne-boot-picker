@@ -58,8 +58,11 @@ Tapping a kernel opens a confirm dialog with four actions: **Boot**,
 keyboard, one-time, not persisted) and **Set Default** (persist this kernel as
 the first entry for future boots).
 
-**Installing** unpacks the tarball onto the real system and then runs
-`depmod`, `update-initramfs` and `update-grub` *inside it* via chroot — the
+**Installing** shows a live progress screen — spinner, the current step, and
+a rolling tail of the installer's own output — because the work runs as a
+child of `picker` rather than after it exits. It unpacks the tarball onto the
+real system and then runs `depmod`, `update-initramfs` and `update-grub`
+*inside it* via chroot — the
 system's own tools, against its own configuration. Doing it from here means
 the root filesystem is not in use: no package manager holding locks, no
 running kernel having its modules replaced underneath it. It is additive, so
@@ -74,11 +77,11 @@ device: it is the reason a broken touchscreen cannot strand you.
 
 <img src="docs/screenshots/01-menu.png" width="31%"> <img src="docs/screenshots/02-kernel-list.png" width="31%"> <img src="docs/screenshots/03-install-list.png" width="31%">
 
-<img src="docs/screenshots/04-confirm-dialog.png" width="31%"> <img src="docs/screenshots/05-edit-dialog.png" width="31%">
+<img src="docs/screenshots/04-install-progress.png" width="31%"> <img src="docs/screenshots/05-confirm-dialog.png" width="31%"> <img src="docs/screenshots/06-edit-dialog.png" width="31%">
 
 *Top: the main menu, the installed-kernel list (checkmarks mark the saved
-default), and kernel tarballs found on the real system. Bottom: the confirm
-dialog and Edit's on-screen keyboard with the full command line wrapped.*
+default), and kernel tarballs found on the real system. Bottom: an install in
+progress, the confirm dialog, and Edit's on-screen keyboard.*
 
 These are real renders of the current code, not mockups:
 `ui/render-screens.c` includes `picker.c` and calls the same `build_ui()` /

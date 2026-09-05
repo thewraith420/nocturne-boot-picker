@@ -128,6 +128,15 @@ fi
 exit 0
 EOF
     ;;
+    reload) cat > "$SB/bin/picker" <<'EOF'
+#!/bin/sh
+# picker ran the install itself and only wants the menu refreshed.
+n=$(cat /tmp/pickruns 2>/dev/null || echo 0); n=$((n+1)); echo $n > /tmp/pickruns
+if [ "$n" = 1 ]; then echo "RELOAD=1"
+else echo 'SELECTED_LINUX=/boot/vmlinuz-chosen'; echo 'SELECTED_INITRD=x'; echo 'SELECTED_CMDLINE=y'; fi
+exit 0
+EOF
+    ;;
     installfail) cat > "$SB/bin/picker" <<'EOF'
 #!/bin/sh
 n=$(cat /tmp/pickruns 2>/dev/null || echo 0); n=$((n+1)); echo $n > /tmp/pickruns
@@ -273,6 +282,12 @@ both | grep -q "MARKER_KEXEC"               && ok "still boots afterwards" || ba
 both | grep -q "MARKER_RESCUE"              && bad "dropped to rescue over a failed install" || ok "does not drop to rescue"
 log  | grep -q "INSTALL FAILED"             && ok "log records the failure" || bad "failure not in the log"
 log  | grep -q "MARKER_INSTALL_RAN"          && ok "log captures the install output, not just that it failed" || bad "install output missing from the log"
+
+echo "=== 10. RELOAD: picker installed it itself, only wants a refresh ==="
+rm -f /tmp/pickruns; setup rel reload 0 0; run
+both | grep -q "MARKER_INSTALL_RAN"          && bad "installed AGAIN - RELOAD must not re-install" || ok "does NOT re-install (RELOAD is not INSTALL_TARBALL)"
+log  | grep -q "reloading the menu"          && ok "refreshes the kernel list" || bad "no refresh recorded"
+both | grep -q "MARKER_KEXEC.*vmlinuz-chosen" && ok "boots the choice from the refreshed menu" || bad "did not boot"
 
 echo
 echo "passed: $pass   failed: $fail  (${MODE_NAME:-dash + coreutils})"
