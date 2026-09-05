@@ -936,6 +936,40 @@ static volatile int g_installing;
 static char  g_prog_lines[8][160];    /* rolling tail of the output */
 static int   g_prog_n;
 
+/* The menu lists ~25 GRUB entries but far fewer actual kernels - each
+ * release appears as a plain entry, a "with Linux X" entry and a
+ * recovery entry. Removal operates on RELEASES, not menu entries:
+ * offering the same kernel three times and deleting the same files
+ * thrice would be both confusing and wrong. */
+struct kernelfile { char release[128]; char path[256]; int refs; };
+static struct kernelfile g_kernels[MAX_ENTRIES];
+static int g_kernel_n;
+
+static void build_kernel_list(void) {
+    g_kernel_n = 0;
+    for (int i = 0; i < g_entry_n; i++) {
+        const char *p = g_entries[i].linux_path;
+        const char *base = strrchr(p, '/');
+        base = base ? base + 1 : p;
+        if (strncmp(base, "vmlinuz-", 8) != 0) continue;
+
+        int seen = -1;
+        for (int k = 0; k < g_kernel_n; k++)
+            if (!strcmp(g_kernels[k].path, p)) { seen = k; break; }
+        if (seen >= 0) { g_kernels[seen].refs++; continue; }
+        if (g_kernel_n >= MAX_ENTRIES) break;
+        snprintf(g_kernels[g_kernel_n].release, sizeof(g_kernels[0].release), "%s", base + 8);
+        snprintf(g_kernels[g_kernel_n].path, sizeof(g_kernels[0].path), "%s", p);
+        g_kernels[g_kernel_n].refs = 1;
+        g_kernel_n++;
+    }
+}
+
+static const char *remove_script(void) {
+    const char *s = getenv("PICKER_REMOVE_SH");
+    return s ? s : "/bin/remove-kernel.sh";
+}
+
 static const char *install_script(void) {
     const char *s = getenv("PICKER_INSTALL_SH");
     return s ? s : "/bin/install-kernel.sh";
@@ -962,15 +996,15 @@ static void prog_append(const char *line) {
     }
 }
 
-static void show_install_progress(const char *version) {
+static void show_progress(const char *heading, const char *subject, const char *warning) {
     lv_obj_clean(g_list);
     g_prog_n = 0;
     g_installing = 1;
     if (g_countdown) lv_obj_add_flag(g_countdown, LV_OBJ_FLAG_HIDDEN);
-    lv_label_set_text(g_header, LV_SYMBOL_DOWNLOAD "  Installing");
+    lv_label_set_text(g_header, heading);
 
     lv_obj_t *title = lv_label_create(g_list);
-    lv_label_set_text(title, version);
+    lv_label_set_text(title, subject);
     lv_obj_set_style_text_color(title, lv_color_hex(0xe8eef4), 0);
 
     g_prog_spinner = lv_spinner_create(g_list);
@@ -983,7 +1017,7 @@ static void show_install_progress(const char *version) {
     lv_obj_set_width(g_prog_status, lv_pct(100));
 
     lv_obj_t *warn = lv_label_create(g_list);
-    lv_label_set_text(warn, "This takes several minutes. Do not power off.");
+    lv_label_set_text(warn, warning);
     lv_obj_set_style_text_color(warn, lv_color_hex(0x93a0aa), 0);
 
     g_prog_log = lv_label_create(g_list);
@@ -993,14 +1027,19 @@ static void show_install_progress(const char *version) {
     lv_obj_set_width(g_prog_log, lv_pct(100));
 }
 
+/* Which child ran, so the outcome can say something true about it. */
+static const char *g_child_what = "Install";
+static const char *g_child_ok_msg = "";
+static const char *g_child_bad_msg = "";
+
 static void install_finished(int ok) {
     if (g_prog_spinner) { lv_obj_delete(g_prog_spinner); g_prog_spinner = NULL; }
-    lv_label_set_text(g_header, ok ? LV_SYMBOL_OK "  Install finished"
-                                   : LV_SYMBOL_WARNING "  Install failed");
+    char h[64];
+    snprintf(h, sizeof(h), "%s  %s %s", ok ? LV_SYMBOL_OK : LV_SYMBOL_WARNING,
+             g_child_what, ok ? "finished" : "failed");
+    lv_label_set_text(g_header, h);
     if (g_prog_status) {
-        lv_label_set_text(g_prog_status, ok
-            ? "Installed. It will appear in the kernel list."
-            : "Failed - nothing was removed, existing kernels still boot.");
+        lv_label_set_text(g_prog_status, ok ? g_child_ok_msg : g_child_bad_msg);
         lv_obj_set_style_text_color(g_prog_status,
                                     lv_color_hex(ok ? 0x8ec6ff : 0xffb4a2), 0);
     }
@@ -1013,13 +1052,14 @@ static void install_finished(int ok) {
     lv_label_set_text(l, "Back to menu");
     lv_obj_center(l);
     lv_obj_add_event_cb(done, prog_done_cb, LV_EVENT_CLICKED, NULL);
-    screenshot_soon(ok ? "install-done" : "install-failed");
+    screenshot_soon(ok ? "child-done" : "child-failed");
 }
 
-/* 0: child started, the UI takes over. -1: fall back to exiting and
- * letting init run the install. */
-static int start_install(int idx) {
-    const char *script = install_script();
+/* 0: child started, the UI takes over. -1: caller should fall back to
+ * exiting and letting init do the work. */
+static int start_child(const char *script, const char *arg,
+                       const char *heading, const char *subject,
+                       const char *warning) {
     if (access(script, X_OK) != 0) return -1;
 
     int pfd[2];
@@ -1033,15 +1073,96 @@ static int start_install(int idx) {
         dup2(pfd[1], STDERR_FILENO);
         close(pfd[1]);
         const char *root = getenv("PICKER_ROOT");
-        execl(script, script, root ? root : "/mnt/root",
-              g_tarballs[idx].path, (char *)NULL);
+        execl(script, script, root ? root : "/mnt/root", arg, (char *)NULL);
         _exit(127);
     }
     close(pfd[1]);
     g_install_fd = pfd[0];
     g_install_pid = pid;
-    show_install_progress(g_tarballs[idx].version);
+    show_progress(heading, subject, warning);
     return 0;
+}
+
+static int start_install(int idx) {
+    g_child_what = "Install";
+    g_child_ok_msg  = "Installed. It will appear in the kernel list.";
+    g_child_bad_msg = "Failed - nothing was removed, existing kernels still boot.";
+    return start_child(install_script(), g_tarballs[idx].path,
+                       LV_SYMBOL_DOWNLOAD "  Installing",
+                       g_tarballs[idx].version,
+                       "This takes several minutes. Do not power off.");
+}
+
+static int start_remove(int idx) {
+    g_child_what = "Removal";
+    g_child_ok_msg  = "Removed. The menu entries are gone too.";
+    g_child_bad_msg = "Failed - see the output above. Nothing else changed.";
+    return start_child(remove_script(), g_kernels[idx].release,
+                       LV_SYMBOL_TRASH "  Removing",
+                       g_kernels[idx].release,
+                       "Deleting the kernel, its modules and its menu entries.");
+}
+
+static void remove_confirm_cb(lv_event_t *e) {
+    lv_obj_t *mbox = lv_event_get_user_data(e);
+    int idx = (int)(intptr_t)lv_obj_get_user_data(mbox);
+    lv_msgbox_close_async(mbox);
+    if (start_remove(idx) != 0) {
+        /* No script to run it with (hand-run from a VT). Removal is
+         * destructive and there is no init-side fallback for it, so say
+         * so rather than appearing to have done something. */
+        lv_obj_t *m = lv_msgbox_create(NULL);
+        lv_obj_set_width(m, lv_pct(70));
+        lv_msgbox_add_title(m, "Cannot remove");
+        lv_msgbox_add_text(m, "remove-kernel.sh is not available in this "
+                              "environment, so nothing was changed.");
+        lv_obj_t *b = lv_msgbox_add_footer_button(m, "OK");
+        lv_obj_set_height(lv_msgbox_get_footer(m), LV_SIZE_CONTENT);
+        lv_obj_set_height(b, DIALOG_BTN_H);
+        lv_obj_add_event_cb(b, cancel_cb, LV_EVENT_CLICKED, m);
+    }
+}
+
+static void remove_click_cb(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+
+    lv_obj_t *mbox = lv_msgbox_create(NULL);
+    lv_obj_set_width(mbox, lv_pct(72));
+    lv_obj_set_user_data(mbox, (void *)(intptr_t)idx);
+    lv_msgbox_add_title(mbox, "Remove this kernel?");
+
+    char body[600];
+    snprintf(body, sizeof(body),
+             "%s\n\n"
+             "Deletes the kernel, its initramfs and its modules, and removes "
+             "its %d menu entr%s.\n\n"
+             "This cannot be undone from here - you would have to reinstall "
+             "it. %d other kernel%s would remain.",
+             g_kernels[idx].release, g_kernels[idx].refs,
+             g_kernels[idx].refs == 1 ? "y" : "ies",
+             g_kernel_n - 1, g_kernel_n - 1 == 1 ? "" : "s");
+    lv_msgbox_add_text(mbox, body);
+
+    lv_obj_t *go = lv_msgbox_add_footer_button(mbox, "Remove");
+    lv_obj_t *no = lv_msgbox_add_footer_button(mbox, "Cancel");
+    lv_obj_t *footer = lv_msgbox_get_footer(mbox);
+    lv_obj_set_height(footer, LV_SIZE_CONTENT);
+    lv_obj_set_height(lv_msgbox_get_header(mbox), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(footer, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_style_pad_column(footer, DIALOG_BTN_GAP, 0);
+    lv_obj_set_style_pad_row(footer, DIALOG_BTN_GAP, 0);
+    lv_obj_set_width(go, lv_pct(DIALOG_BTN_W_PCT));
+    lv_obj_set_width(no, lv_pct(DIALOG_BTN_W_PCT));
+    lv_obj_set_height(go, DIALOG_BTN_H);
+    lv_obj_set_height(no, DIALOG_BTN_H);
+    /* Destructive action, so it is the one that looks dangerous rather
+     * than the one that looks default. */
+    lv_obj_set_style_bg_color(go, lv_color_hex(0xc0392b), 0);
+    lv_obj_set_style_bg_opa(go, LV_OPA_40, 0);
+
+    lv_obj_add_event_cb(go, remove_confirm_cb, LV_EVENT_CLICKED, mbox);
+    lv_obj_add_event_cb(no, cancel_cb, LV_EVENT_CLICKED, mbox);
+    screenshot_soon("remove-dialog");
 }
 
 static void install_confirm_cb(lv_event_t *e) {
@@ -1104,6 +1225,7 @@ static void install_click_cb(lv_event_t *e) {
 static void show_main_menu(void);
 static void show_kernel_list(void);
 static void show_install_list(void);
+static void show_remove_list(void);
 
 static lv_obj_t *make_row_h(const char *icon, const char *text, int dimmed, int h) {
     lv_obj_t *btn = lv_button_create(g_list);
@@ -1151,6 +1273,44 @@ static void show_main_menu(void) {
         snprintf(buf, sizeof(buf), "Install a kernel   (none found)");
     b = make_row_h(LV_SYMBOL_DOWNLOAD, buf, g_tarball_n == 0, MENU_ROW_H);
     lv_obj_add_event_cb(b, nav_cb, LV_EVENT_CLICKED, (void *)show_install_list);
+
+    build_kernel_list();
+    snprintf(buf, sizeof(buf), "Remove a kernel   (%d installed)", g_kernel_n);
+    b = make_row_h(LV_SYMBOL_TRASH, buf, g_kernel_n <= 1, MENU_ROW_H);
+    lv_obj_add_event_cb(b, nav_cb, LV_EVENT_CLICKED, (void *)show_remove_list);
+}
+
+static void show_remove_list(void) {
+    lv_obj_clean(g_list);
+    lv_label_set_text(g_header, LV_SYMBOL_TRASH "  Remove a kernel");
+    add_back_row(show_main_menu);
+
+    build_kernel_list();
+
+    /* The last kernel is never offered. remove-kernel.sh refuses it too
+     * - that is the guard that actually matters - but a button you are
+     * not allowed to press is worse than no button. */
+    if (g_kernel_n <= 1) {
+        lv_obj_t *l = lv_label_create(g_list);
+        lv_label_set_text(l, "Only one kernel is installed.\n\n"
+                             "Removing it would leave nothing to boot,\n"
+                             "so it is not offered here.");
+        lv_obj_set_style_text_color(l, lv_color_hex(0x93a0aa), 0);
+        return;
+    }
+
+    for (int i = 0; i < g_kernel_n; i++) {
+        char row[220];
+        /* Bounded explicitly: gcc cannot prove the index is in range,
+         * so it assumes the whole array might be one unterminated
+         * string. Harmless - snprintf truncates - but a precision here
+         * states the intent and keeps the build warning-free. */
+        snprintf(row, sizeof(row), "%.120s   (%d menu entr%s)",
+                 g_kernels[i].release, g_kernels[i].refs,
+                 g_kernels[i].refs == 1 ? "y" : "ies");
+        lv_obj_t *b = make_row(LV_SYMBOL_TRASH, row, 0);
+        lv_obj_add_event_cb(b, remove_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+    }
 }
 
 static void show_kernel_list(void) {
@@ -1202,7 +1362,7 @@ static void show_install_list(void) {
     }
     for (int i = 0; i < g_tarball_n; i++) {
         char row[220];
-        snprintf(row, sizeof(row), "%s   (%s)", g_tarballs[i].version, g_tarballs[i].size);
+        snprintf(row, sizeof(row), "%.120s   (%.20s)", g_tarballs[i].version, g_tarballs[i].size);
         lv_obj_t *b = make_row(LV_SYMBOL_DOWNLOAD, row, 0);
         lv_obj_add_event_cb(b, install_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
     }

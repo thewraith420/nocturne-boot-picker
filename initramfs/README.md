@@ -65,6 +65,21 @@ on selection.
   its own entry lives in `custom.cfg`, which `grub-mkconfig` never
   rewrites. The root goes back to read-only on the way out, including on
   failure.
+- `remove-kernel.sh` - the mirror of `install-kernel.sh`: deletes
+  `/boot/{vmlinuz,initrd.img,System.map,config}-<release>` and
+  `/lib/modules/<release>`, then runs `update-grub` inside the real
+  system so the menu entries go with the files. **This is the one script
+  here that can make the machine unbootable, so it refuses more than it
+  accepts.** It will not remove the last remaining kernel (the guard
+  that actually matters - the kernel's own `uninstall.sh` checks nothing
+  beyond being root and will happily leave you with none), nor the
+  running kernel, nor a release whose `vmlinuz` isn't there, nor
+  anything path-shaped. It also clears `/boot/picker-default` when that
+  pointed at the kernel just removed - `apply-default.sh` tolerates a
+  stale marker, but it would silently stop working with no clue why.
+  `test-remove-kernel.sh` covers all of that against a fake root, and
+  most of its 18 assertions are cases where the right answer is "refuse
+  and change nothing".
 - `discover-kernels.sh` - parses a GRUB config for `menuentry` stanzas at
   any nesting depth (real kernels turned out to live inside an "Advanced
   options" submenu, not flat - see `docs/nocturne-grub.cfg`) into a

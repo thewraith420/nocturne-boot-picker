@@ -89,6 +89,44 @@ int main(void) {
     ck(start_install(0) == 0, "starts a failing install too");
     ck(drain() == 0, "reports FAILURE for an exit-1 install (not silently ok)");
 
+    /* --- removal: the distinct-kernel list --- */
+    /* Real menus repeat each release as a plain entry, a "with Linux X"
+     * entry and a recovery entry. Removal must offer each RELEASE once,
+     * not each menu entry - deleting the same files three times would
+     * be both confusing and wrong. */
+    static struct entry many[5] = {
+        { "Ubuntu",                    "/boot/vmlinuz-7.1.12", "/boot/initrd.img-7.1.12", "ro", 0 },
+        { "Ubuntu, with Linux 7.1.12", "/boot/vmlinuz-7.1.12", "/boot/initrd.img-7.1.12", "ro", 0 },
+        { "Ubuntu, 7.1.12 (recovery)", "/boot/vmlinuz-7.1.12", "/boot/initrd.img-7.1.12", "ro", 0 },
+        { "Ubuntu, with Linux 7.1.9",  "/boot/vmlinuz-7.1.9",  "/boot/initrd.img-7.1.9",  "ro", 0 },
+        { "memtest-ish (no vmlinuz)",  "/boot/memtest86+.bin", "",                        "",   0 },
+    };
+    g_entries = many; g_entry_n = 5;
+    build_kernel_list();
+    ck(g_kernel_n == 2, "five menu entries collapse to two distinct kernels");
+    ck(!strcmp(g_kernels[0].release, "7.1.12") && g_kernels[0].refs == 3,
+       "release parsed from the vmlinuz name, with its 3 menu entries counted");
+    ck(!strcmp(g_kernels[1].release, "7.1.9") && g_kernels[1].refs == 1,
+       "the second kernel is listed once");
+    for (int i = 0; i < g_kernel_n; i++)
+        if (strstr(g_kernels[i].release, "memtest")) ck(0, "non-vmlinuz entry leaked into the removal list");
+    ck(1, "non-vmlinuz entries are not offered for removal");
+
+    /* --- removal runs the right script with the RELEASE, not a path --- */
+    f = fopen("/tmp/mock-remove.sh", "w");
+    fprintf(f, "#!/bin/sh\necho \"remove-kernel: removing $2\"\nexit 0\n");
+    fclose(f); chmod("/tmp/mock-remove.sh", 0755);
+    setenv("PICKER_REMOVE_SH", "/tmp/mock-remove.sh", 1);
+    g_prog_n = 0;
+    ck(start_remove(0) == 0, "starts the removal child");
+    ck(drain() == 1, "reports success");
+    ck(strstr(g_prog_lines[0], "removing 7.1.12") != NULL,
+       "passes the kernel RELEASE to the script, not a file path");
+
+    setenv("PICKER_REMOVE_SH", "/nonexistent/remove-kernel.sh", 1);
+    ck(start_remove(0) == -1, "refuses to pretend when the remove script is missing");
+
+    remove("/tmp/mock-remove.sh");
     remove("/tmp/mock-install-ok.sh"); remove("/tmp/mock-install-bad.sh");
     printf("\npassed: %d  failed: %d\n", passes, fails);
     return fails ? 1 : 0;

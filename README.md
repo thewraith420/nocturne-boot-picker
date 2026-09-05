@@ -49,9 +49,9 @@ GRUB  →  picker kernel  →  init (PID 1)  →  mount real root (ro)
       →  kexec into the chosen kernel
 ```
 
-The menu opens on two choices: **Boot a kernel**, which lists everything
-found in `grub.cfg`, and **Install a kernel**, which lists kernel tarballs
-found on the real system.
+The menu opens on three choices: **Boot a kernel**, which lists everything
+found in `grub.cfg`; **Install a kernel**, which lists kernel tarballs found
+on the real system; and **Remove a kernel**.
 
 Tapping a kernel opens a confirm dialog with four actions: **Boot**,
 **Cancel**, **Edit** (change this boot's kernel command line via an on-screen
@@ -75,13 +75,14 @@ device: it is the reason a broken touchscreen cannot strand you.
 
 ### Screenshots
 
-<img src="docs/screenshots/01-menu.png" width="31%"> <img src="docs/screenshots/02-kernel-list.png" width="31%"> <img src="docs/screenshots/03-install-list.png" width="31%">
+<img src="docs/screenshots/01-menu.png" width="24%"> <img src="docs/screenshots/02-kernel-list.png" width="24%"> <img src="docs/screenshots/03-install-list.png" width="24%"> <img src="docs/screenshots/04-remove-list.png" width="24%">
 
-<img src="docs/screenshots/04-install-progress.png" width="31%"> <img src="docs/screenshots/05-confirm-dialog.png" width="31%"> <img src="docs/screenshots/06-edit-dialog.png" width="31%">
+<img src="docs/screenshots/05-remove-dialog.png" width="24%"> <img src="docs/screenshots/06-install-progress.png" width="24%"> <img src="docs/screenshots/07-confirm-dialog.png" width="24%"> <img src="docs/screenshots/08-edit-dialog.png" width="24%">
 
 *Top: the main menu, the installed-kernel list (checkmarks mark the saved
-default), and kernel tarballs found on the real system. Bottom: an install in
-progress, the confirm dialog, and Edit's on-screen keyboard.*
+default), tarballs available to install, and kernels available to remove.
+Bottom: the removal confirmation, an install in progress, the boot confirm
+dialog, and Edit's on-screen keyboard.*
 
 These are real renders of the current code, not mockups:
 `ui/render-screens.c` includes `picker.c` and calls the same `build_ui()` /
@@ -106,6 +107,15 @@ kernel list and edge-to-edge buttons are how it looked then.*
 `picker` can also capture itself on the device
 (`PICKER_SCREENSHOT_DIR=/path ./picker menu.tsv`), correctly un-rotated
 regardless of panel orientation — see [`ui/README.md`](ui/README.md#screenshots).
+
+**Removing** is the mirror image, and the only operation here that can make
+the machine unbootable — so it refuses more than it accepts. It lists
+*distinct kernel releases* rather than menu entries (25 GRUB entries are
+typically a dozen actual kernels, each appearing as a normal, a "with Linux
+X" and a recovery entry), and deletes the kernel, its initramfs, its modules
+and all of its menu entries together. It will not remove the last remaining
+kernel, the running kernel, or anything whose files aren't actually there,
+and it clears the saved default if that's what it just deleted.
 
 ## Building and installing
 

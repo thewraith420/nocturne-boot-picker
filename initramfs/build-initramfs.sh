@@ -28,7 +28,7 @@ trap 'rm -rf "$staging"' EXIT
 # applet symlinks into the one busybox binary, so they cost no space.
 APPLETS="sh mount umount mkdir echo printf cut head awk cat ls
          sleep dmesg uname tail sync date wc grep
-         tar chroot tee"
+         tar chroot tee rm"
 
 say() { echo "==> $*"; }
 die() { echo "build-initramfs: $*" >&2; exit 1; }
@@ -54,6 +54,7 @@ picker_bin=$repo/ui/picker
 
 for f in "$here/init" "$here/discover-kernels.sh" "$here/apply-default.sh" \
          "$here/discover-tarballs.sh" "$here/install-kernel.sh" \
+         "$here/remove-kernel.sh" \
          "$repo/boot-integration/kexec-boot.sh"; do
     [ -r "$f" ] || die "missing source file: $f"
 done
@@ -87,6 +88,7 @@ install -m 0755 "$here/discover-kernels.sh"         "$staging/bin/discover-kerne
 install -m 0755 "$here/apply-default.sh"            "$staging/bin/apply-default.sh"
 install -m 0755 "$here/discover-tarballs.sh"        "$staging/bin/discover-tarballs.sh"
 install -m 0755 "$here/install-kernel.sh"           "$staging/bin/install-kernel.sh"
+install -m 0755 "$here/remove-kernel.sh"            "$staging/bin/remove-kernel.sh"
 install -m 0755 "$repo/boot-integration/kexec-boot.sh" "$staging/sbin/kexec-boot.sh"
 
 # ------------------------------------------------------------ shared libraries

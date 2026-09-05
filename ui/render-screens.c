@@ -20,6 +20,14 @@
 #define PANEL_W 3000   /* physical panel; logical is the 270-rotated swap */
 #define PANEL_H 2000
 
+/* remove_click_cb takes an lv_event_t; call it the way a tap would. */
+static void remove_click_cb_render(void) {
+    lv_obj_t *tmp = lv_button_create(lv_layer_top());
+    lv_obj_add_event_cb(tmp, remove_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)0);
+    lv_obj_send_event(tmp, LV_EVENT_CLICKED, NULL);
+    lv_obj_delete(tmp);
+}
+
 int main(int argc, char **argv) {
     if (argc < 3) {
         fprintf(stderr, "usage: render-screens <menu.tsv> <outdir>\n");
@@ -91,8 +99,24 @@ int main(int argc, char **argv) {
     lv_refr_now(disp);
     screenshot("install-list");
 
+    show_remove_list();
+    lv_refr_now(disp);
+    screenshot("remove-list");
+
+    /* The removal confirmation - the destructive one. */
+    remove_click_cb_render();
+    lv_refr_now(disp);
+    g_shot_pending = NULL;
+    screenshot("remove-dialog");
+    {   /* dismiss it before moving on */
+        lv_obj_t *top = lv_layer_top();
+        lv_obj_t *bd = lv_obj_get_child(top, lv_obj_get_child_count(top) - 1);
+        lv_obj_delete(bd);
+    }
+
     /* The progress screen, with a plausible run of real output. */
-    show_install_progress("7.2.3-pixel-slate");
+    show_progress(LV_SYMBOL_DOWNLOAD "  Installing", "7.2.3-pixel-slate",
+                  "This takes several minutes. Do not power off.");
     prog_append("install-kernel: reading /home/bob/buildstuff/BobZKernel-7.2.3-pixel-slate-installer.tar.gz");
     prog_append("install-kernel: kernel release: 7.2.3-BobZKernel-pixel-slate");
     prog_append("install-kernel: remounting /mnt/root read-write");
