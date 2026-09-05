@@ -1096,7 +1096,10 @@ static int start_install(int idx) {
 static int start_remove(int idx) {
     g_child_what = "Removal";
     g_child_ok_msg  = "Removed. The menu entries are gone too.";
-    g_child_bad_msg = "Failed - see the output above. Nothing else changed.";
+    /* NOT "nothing changed": by the time update-grub can fail the files
+     * are already gone. Claiming otherwise sent me looking in the wrong
+     * place on the first real failure. */
+    g_child_bad_msg = "Failed - see the output above before rebooting.";
     return start_child(remove_script(), g_kernels[idx].release,
                        LV_SYMBOL_TRASH "  Removing",
                        g_kernels[idx].release,

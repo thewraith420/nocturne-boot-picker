@@ -20,6 +20,11 @@
 #      runnable by hand, where it matters a great deal.
 #   3. The kernel must actually be there, so a typo fails loudly rather
 #      than "succeeding" having deleted nothing.
+#   4. The chroot must be able to resolve the root device BEFORE anything
+#      is deleted. Learned the hard way: the first real removal deleted
+#      the kernel cleanly and then failed at update-grub, leaving the
+#      files gone and grub.cfg still listing them - worse than either
+#      finishing or not starting.
 set -eu
 
 root=${1:?usage: remove-kernel.sh <root-mount> <kernel-release>}
@@ -63,10 +68,37 @@ say "remounting $root read-write"
 mount -o remount,rw "$root" || die "could not remount $root read-write"
 
 cleanup() {
+    for d in dev/pts dev proc sys; do
+        umount "$root/$d" 2>/dev/null || true
+    done
     mount -o remount,ro "$root" 2>/dev/null || \
         say "WARNING: could not remount $root read-only again"
 }
 trap cleanup EXIT
+
+# ------------------------------------------------- chroot BEFORE deleting
+# Set the chroot up and prove it works while everything is still intact.
+# The first real removal deleted the kernel cleanly and then failed at
+# update-grub with "grub-probe: failed to get canonical path of
+# '/dev/mmcblk0p2'", because /dev was never bind-mounted - install-kernel.sh
+# does it, this did not. That left the files gone and grub.cfg still
+# listing them, which is a worse state than either finishing or not
+# starting.
+#
+# So: mount everything first, then ASK grub-probe to resolve the root
+# device. If it cannot, nothing has been deleted yet and we can refuse.
+say "preparing chroot"
+mount -t proc  none "$root/proc" 2>/dev/null || die "could not mount /proc in the chroot"
+mount -t sysfs none "$root/sys"  2>/dev/null || die "could not mount /sys in the chroot"
+# grub-probe resolves the root device through real device nodes; without
+# this it cannot canonicalise /dev/mmcblk0p2 and update-grub fails.
+mount -o bind /dev "$root/dev" 2>/dev/null || die "could not bind /dev into the chroot"
+mount -o bind /dev/pts "$root/dev/pts" 2>/dev/null || true
+
+say "checking the chroot can resolve the disk"
+chroot "$root" /usr/sbin/grub-probe --target=device / >/dev/null 2>&1 || \
+    die "grub-probe cannot resolve the root device inside the chroot - refusing to delete anything"
+
 
 # ---------------------------------------------------------------- remove
 for f in "vmlinuz-$release" "System.map-$release" "config-$release" \
@@ -91,13 +123,12 @@ sync
 
 # ------------------------------------------------- regenerate the menu
 # Without this the entries remain in grub.cfg pointing at files that are
-# gone, which is a worse state than before the removal.
+# gone. The chroot was set up and proven above, so reaching here and
+# failing means something unusual - say so precisely, because the files
+# really are gone by this point.
 say "update-grub"
-mount -t proc  none "$root/proc" 2>/dev/null || die "could not mount /proc in the chroot"
-mount -t sysfs none "$root/sys"  2>/dev/null || true
-chroot "$root" /usr/sbin/update-grub || die "update-grub failed - grub.cfg may still list $release"
-umount "$root/sys" 2>/dev/null || true
-umount "$root/proc" 2>/dev/null || true
+chroot "$root" /usr/sbin/update-grub || \
+    die "update-grub failed AFTER the files were removed - grub.cfg may still list $release; run 'sudo update-grub' once booted"
 
 sync
 say "removed $release successfully"

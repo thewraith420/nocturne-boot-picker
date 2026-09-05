@@ -27,7 +27,14 @@ setup() {
   # mount/umount/chroot are all no-ops here; chroot records that it ran.
   printf '#!/bin/sh\nexit 0\n' > "$SB/bin/mount"
   printf '#!/bin/sh\nexit 0\n' > "$SB/bin/umount"
-  printf '#!/bin/sh\necho "MARKER_UPDATE_GRUB $*" >&2\nexit 0\n' > "$SB/bin/chroot"
+  cat > "$SB/bin/chroot" <<EOF
+#!/bin/sh
+case "\$*" in
+  *grub-probe*) exit ${GRUB_PROBE_RC:-0} ;;
+  *update-grub*) echo "MARKER_UPDATE_GRUB \$*" >&2; exit ${UPDATE_GRUB_RC:-0} ;;
+esac
+exit 0
+EOF
   chmod +x "$SB"/bin/*
 }
 run() { PATH="$SB/bin:$PATH" sh "$SCRIPT" "$SB/root" "$1" >"$SB/out" 2>&1; echo $?; }
@@ -66,6 +73,19 @@ done
 [ -f "$SB/root/boot/vmlinuz-keep-me" ] && ok "left the OTHER kernel alone" || bad "collateral damage"
 [ -d "$SB/root/lib/modules/keep-me" ] && ok "left the other kernel's modules alone" || bad "removed the wrong modules"
 out | grep -q "MARKER_UPDATE_GRUB.*update-grub" && ok "regenerates grub.cfg so the entries go too" || bad "did not run update-grub"
+
+echo "=== preflight: a chroot that cannot see the disk must not delete ==="
+# The real failure: update-grub died with "grub-probe: failed to get
+# canonical path of /dev/mmcblk0p2" AFTER the kernel was already gone,
+# because /dev was never bind-mounted. The fix proves the chroot works
+# BEFORE touching anything, so this case now changes nothing at all.
+# NB: on setup, not run - the mock bakes the exit code in when it is written.
+GRUB_PROBE_RC=1 setup "keep-me remove-me"
+rc=$(run remove-me)
+[ "$rc" != 0 ] && ok "refuses when grub-probe cannot resolve the root device" || bad "proceeded with a broken chroot"
+[ -f "$SB/root/boot/vmlinuz-remove-me" ] && ok "deleted NOTHING - the files are still there" || bad "deleted the kernel anyway, then failed"
+[ -d "$SB/root/lib/modules/remove-me" ] && ok "modules still there too" || bad "removed modules despite the failure"
+out | grep -q "refusing to delete anything" && ok "says it refused rather than half-finishing" || bad "unclear message"
 
 echo "=== the saved default pointing at the removed kernel ==="
 
