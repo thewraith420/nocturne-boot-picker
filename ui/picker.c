@@ -683,6 +683,53 @@ static volatile int g_install = -1;
 static volatile int g_set_default = 0;
 static struct entry *g_entries;
 
+/* Declared up here because the recovery helpers below need it. */
+static int g_entry_n;
+
+/* GRUB emits a recovery variant beside most normal entries - same
+ * kernel, same initrd, a cmdline with "recovery nomodeset". Listing
+ * both doubles the menu for something you want maybe once a year, and
+ * separates the recovery option from the kernel it belongs to. So they
+ * are folded into the confirm dialog for their own kernel instead.
+ *
+ * Detected from the CMDLINE rather than the title: "recovery" as a
+ * kernel argument is what actually makes it a recovery boot, whereas
+ * the "(recovery mode)" suffix is display text GRUB could localise.
+ * The title is kept as a fallback for configs that word it differently.
+ * Verified against the Slate's real grub.cfg: all 12 recovery entries
+ * carry the cmdline word, none of the 13 normal ones do. */
+static int has_word(const char *hay, const char *word) {
+    size_t wl = strlen(word);
+    for (const char *p = strstr(hay, word); p; p = strstr(p + 1, word)) {
+        char before = (p == hay) ? ' ' : p[-1];
+        char after  = p[wl];
+        if ((before == ' ' || before == '\0') && (after == ' ' || after == '\0'))
+            return 1;
+    }
+    return 0;
+}
+
+static int is_recovery(const struct entry *e) {
+    return has_word(e->cmdline, "recovery") || strstr(e->title, "(recovery mode)") != NULL;
+}
+
+/* The recovery entry for the same kernel, or -1. Matched on the kernel
+ * image path - the pair differ only in cmdline. */
+static int find_recovery_for(int idx) {
+    if (idx < 0 || idx >= g_entry_n || is_recovery(&g_entries[idx])) return -1;
+    for (int i = 0; i < g_entry_n; i++)
+        if (i != idx && is_recovery(&g_entries[i]) &&
+            !strcmp(g_entries[i].linux_path, g_entries[idx].linux_path))
+            return i;
+    return -1;
+}
+
+static int count_bootable_rows(void) {
+    int n = 0;
+    for (int i = 0; i < g_entry_n; i++) if (!is_recovery(&g_entries[i])) n++;
+    return n;
+}
+
 static void open_confirm_dialog(int idx);
 
 /* Nothing else to do here: the main loop exits as soon as g_selected
@@ -692,6 +739,13 @@ static void open_confirm_dialog(int idx);
 static void confirm_cb(lv_event_t *e) {
     lv_obj_t *mbox = lv_event_get_user_data(e);
     g_selected = (int)(intptr_t)lv_obj_get_user_data(mbox);
+}
+
+/* Boots the recovery variant. The index carries everything - initrd and
+ * cmdline come from that entry - so this needs no special handling
+ * downstream; it is just a different entry to select. */
+static void recovery_cb(lv_event_t *e) {
+    g_selected = (int)(intptr_t)lv_event_get_user_data(e);
 }
 
 /* Set Default also boots into this entry now, same as Boot - the user
@@ -843,10 +897,18 @@ static void open_confirm_dialog(int idx) {
     snprintf(body, sizeof(body), "Boot into:\n\n%s", g_entries[idx].title);
     lv_msgbox_add_text(mbox, body);
 
+    /* Creation order is layout order. Recovery is created LAST and
+     * spans the final row, so the approved 2x2 (Edit/Set Default over
+     * Boot/Cancel) is untouched and Recovery reads as the extra option
+     * it is. Spanning Cancel instead - the first thing I tried - made
+     * the cancel action the largest, brightest target in the dialog,
+     * which is exactly backwards. */
+    int rec = find_recovery_for(idx);
     lv_obj_t *edit_btn = lv_msgbox_add_footer_button(mbox, "Edit");
     lv_obj_t *default_btn = lv_msgbox_add_footer_button(mbox, "Set Default");
     lv_obj_t *confirm_btn = lv_msgbox_add_footer_button(mbox, "Boot");
     lv_obj_t *cancel_btn = lv_msgbox_add_footer_button(mbox, "Cancel");
+    lv_obj_t *recovery_btn = (rec >= 0) ? lv_msgbox_add_footer_button(mbox, "Recovery") : NULL;
 
     lv_obj_t *footer = lv_msgbox_get_footer(mbox);
     /* The footer and header classes default to a hardcoded
@@ -866,8 +928,9 @@ static void open_confirm_dialog(int idx) {
      * buttons are no longer edge-to-edge. Change one, check the other. */
     lv_obj_set_style_pad_column(footer, DIALOG_BTN_GAP, 0);
     lv_obj_set_style_pad_row(footer, DIALOG_BTN_GAP, 0);
-    lv_obj_t *footer_btns[4] = {edit_btn, default_btn, confirm_btn, cancel_btn};
-    for (int i = 0; i < 4; i++) {
+    lv_obj_t *footer_btns[5] = {edit_btn, default_btn, confirm_btn, cancel_btn, recovery_btn};
+    int nbtn = recovery_btn ? 5 : 4;
+    for (int i = 0; i < nbtn; i++) {
         lv_obj_set_width(footer_btns[i], lv_pct(DIALOG_BTN_W_PCT));
         /* Explicit touch target: the theme sizes these from the font
          * alone, which left them ~13px (about 1mm) tall on this panel -
@@ -889,6 +952,15 @@ static void open_confirm_dialog(int idx) {
     lv_obj_set_style_border_color(confirm_btn, lv_color_hex(0x232c35), 0);
     lv_obj_set_style_border_color(cancel_btn, lv_color_hex(0x232c35), 0);
 
+    if (recovery_btn) {
+        lv_obj_set_width(recovery_btn, lv_pct(100));
+        /* Muted rather than accented: it is a deliberate, occasional
+         * choice, not something to draw the eye on every boot. */
+        lv_obj_set_style_bg_color(recovery_btn, lv_color_hex(0x2a3a4d), 0);
+        lv_obj_set_style_text_color(recovery_btn, lv_color_hex(0xd9c48a), 0);
+        lv_obj_add_event_cb(recovery_btn, recovery_cb, LV_EVENT_CLICKED, (void *)(intptr_t)rec);
+    }
+
     lv_obj_add_event_cb(edit_btn, edit_cb, LV_EVENT_CLICKED, mbox);
     lv_obj_add_event_cb(default_btn, set_default_cb, LV_EVENT_CLICKED, mbox);
     lv_obj_add_event_cb(confirm_btn, confirm_cb, LV_EVENT_CLICKED, mbox);
@@ -905,7 +977,6 @@ static lv_obj_t *g_list;      /* the container the screens rebuild */
 static lv_obj_t *g_header;
 static struct tarball *g_tarballs;
 static int g_tarball_n;
-static int g_entry_n;
 
 /* ---------------- install progress ----------------
  *
@@ -1266,7 +1337,7 @@ static void show_main_menu(void) {
     lv_label_set_text(g_header, LV_SYMBOL_POWER "  Boot picker");
 
     char buf[96];
-    snprintf(buf, sizeof(buf), "Boot a kernel   (%d installed)", g_entry_n);
+    snprintf(buf, sizeof(buf), "Boot a kernel   (%d installed)", count_bootable_rows());
     lv_obj_t *b = make_row_h(LV_SYMBOL_USB, buf, 0, MENU_ROW_H);
     lv_obj_add_event_cb(b, nav_cb, LV_EVENT_CLICKED, (void *)show_kernel_list);
 
@@ -1322,6 +1393,9 @@ static void show_kernel_list(void) {
     add_back_row(show_main_menu);
 
     for (int i = 0; i < g_entry_n; i++) {
+        /* Recovery variants live in their kernel's confirm dialog. */
+        if (is_recovery(&g_entries[i])) continue;
+
         lv_obj_t *btn = lv_button_create(g_list);
         lv_obj_set_width(btn, lv_pct(100));
         lv_obj_set_height(btn, ROW_H);

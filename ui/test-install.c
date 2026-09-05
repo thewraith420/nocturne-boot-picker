@@ -89,6 +89,26 @@ int main(void) {
     ck(start_install(0) == 0, "starts a failing install too");
     ck(drain() == 0, "reports FAILURE for an exit-1 install (not silently ok)");
 
+    /* --- recovery entries fold into their kernel's dialog --- */
+    static struct entry rec[4] = {
+        { "Ubuntu, with Linux 7.1.12",           "/boot/vmlinuz-7.1.12", "/boot/initrd.img-7.1.12", "ro quiet splash", 0 },
+        { "Ubuntu, with Linux 7.1.12 (recovery mode)", "/boot/vmlinuz-7.1.12", "/boot/initrd.img-7.1.12", "ro recovery nomodeset", 0 },
+        { "Ubuntu, with Linux 7.1.9",            "/boot/vmlinuz-7.1.9",  "/boot/initrd.img-7.1.9",  "ro quiet splash", 0 },
+        /* the trap: "discovery" contains "recovery" as a substring */
+        { "Ubuntu with disk discovery",          "/boot/vmlinuz-7.1.8",  "/boot/initrd.img-7.1.8",  "ro discovery=on", 0 },
+    };
+    g_entries = rec; g_entry_n = 4;
+    ck(is_recovery(&rec[1]), "recognises a recovery entry by its cmdline");
+    ck(!is_recovery(&rec[0]), "a normal entry is not recovery");
+    ck(!is_recovery(&rec[3]), "'discovery' in the cmdline is NOT recovery (substring trap)");
+    ck(!has_word("ro nomodeset", "recovery"), "has_word does not match an absent word");
+    ck(has_word("recovery nomodeset", "recovery"), "matches at the start");
+    ck(has_word("ro recovery", "recovery"), "matches at the end");
+    ck(find_recovery_for(0) == 1, "pairs a kernel with its recovery variant by image path");
+    ck(find_recovery_for(2) == -1, "a kernel with no recovery variant reports none");
+    ck(find_recovery_for(1) == -1, "a recovery entry does not pair with itself");
+    ck(count_bootable_rows() == 3, "recovery entries are not counted as menu rows");
+
     /* --- removal: the distinct-kernel list --- */
     /* Real menus repeat each release as a plain entry, a "with Linux X"
      * entry and a recovery entry. Removal must offer each RELEASE once,

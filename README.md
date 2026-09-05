@@ -53,10 +53,16 @@ The menu opens on three choices: **Boot a kernel**, which lists everything
 found in `grub.cfg`; **Install a kernel**, which lists kernel tarballs found
 on the real system; and **Remove a kernel**.
 
-Tapping a kernel opens a confirm dialog with four actions: **Boot**,
-**Cancel**, **Edit** (change this boot's kernel command line via an on-screen
-keyboard, one-time, not persisted) and **Set Default** (persist this kernel as
-the first entry for future boots).
+Tapping a kernel opens a confirm dialog with **Boot**, **Cancel**, **Edit**
+(change this boot's kernel command line via an on-screen keyboard, one-time,
+not persisted), **Set Default** (persist this kernel as the first entry for
+future boots), and **Recovery** where a recovery variant exists.
+
+GRUB emits a recovery entry beside most normal ones — same kernel, a cmdline
+with `recovery nomodeset`. Listing both doubles the menu for something you
+want maybe once a year and separates the recovery option from the kernel it
+belongs to, so they are folded into that kernel's dialog instead. On the
+Slate that turns 25 rows into 13.
 
 **Installing** shows a live progress screen — spinner, the current step, and
 a rolling tail of the installer's own output — because the work runs as a
